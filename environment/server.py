@@ -1,14 +1,16 @@
-"""Server entry: localhost-only uvicorn launcher."""
+"""Server entry: localhost-only uvicorn launcher. Imports the
+app factory directly (no string imports - keeps the PyInstaller
+sidecar working)."""
 from __future__ import annotations
 
 import uvicorn
 
+from .app import create_app
+
 
 def main():
-    uvicorn.run(
-        "environment.app:create_app",
-        factory=True, host="127.0.0.1", port=8765,
-        log_level="info")
+    uvicorn.run(create_app(), host="127.0.0.1",
+                port=8765, log_level="info")
 
 
 if __name__ == "__main__":

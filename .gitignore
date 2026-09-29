@@ -1,9 +1,12 @@
-﻿__pycache__/
+__pycache__/
 *.pyc
 *.egg-info/
 dist/
 build/
 ui/node_modules/
 ui/dist/
+node_modules/
 src-tauri/target/
+src-tauri/bin/
+src-tauri/gen/
 .veritas-env/

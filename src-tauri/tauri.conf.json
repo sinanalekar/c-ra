@@ -23,6 +23,17 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["msi", "app", "appimage"]
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "externalBin": ["bin/veritas-backend"],
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper" }
+    }
   }
 }

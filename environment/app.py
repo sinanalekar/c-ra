@@ -44,7 +44,8 @@ class Environment:
             self.journal)
         self.orchestrator = Orchestrator(
             self.config, self.registry, self.permissions,
-            self.journal, self.targets)
+            self.journal, self.targets,
+            provider_store=self.providers)
         self.journal.append("session_started",
                            engines=[
                                e["name"] for e in
@@ -92,6 +93,16 @@ class RoleSpec(BaseModel):
     role: str
     provider: str
     model_id: str
+
+
+class AgentTask(BaseModel):
+    kind: str
+    task: dict
+
+
+class RouteSpec(BaseModel):
+    target_id: str
+    vulnerability_class: str = ""
 
 
 def create_app(env: Environment | None = None) -> FastAPI:
@@ -179,6 +190,51 @@ def create_app(env: Environment | None = None) -> FastAPI:
     @app.get("/api/research/status")
     def research_status():
         return env.orchestrator.status()
+
+    # ------------------------------------------------ agents
+
+    @app.post("/api/agents/run")
+    def agent_run(t: AgentTask):
+        try:
+            return env.orchestrator.run_agent(
+                t.kind, t.task)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.get("/api/agents")
+    def agent_status():
+        return env.orchestrator.agent_status()
+
+    @app.get("/api/agents/specs")
+    def agent_specs():
+        from environment.agents import SPECIALISTS
+        return [dict(s) for s in SPECIALISTS.values()]
+
+    # ------------------------------------------------ reports
+    @app.post("/api/experiments/{exp_id}/report")
+    def experiment_report(exp_id: str):
+        rec = env.orchestrator.generate_report(exp_id)
+        if "error" in rec:
+            raise HTTPException(404, rec["error"])
+        return rec
+
+    @app.get("/api/experiments/{exp_id}/report.md")
+    def experiment_report_md(exp_id: str):
+        rec = env.orchestrator.generate_report(exp_id)
+        if "error" in rec:
+            raise HTTPException(404, rec["error"])
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(rec["markdown"])
+
+    # ------------------------------------------------ routing
+
+    @app.post("/api/targets/route")
+    def target_route(spec: RouteSpec):
+        t = env.targets.get(spec.target_id)
+        if t is None:
+            raise HTTPException(404, "unknown target")
+        from environment.routing import route
+        return route(dict(t), spec.vulnerability_class)
 
     # ----------------------------------------------- workspace
 
