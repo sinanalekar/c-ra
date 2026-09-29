@@ -1,100 +1,86 @@
-﻿"""Least-privilege authorization layer. Deny by default; grants
-are explicit, inspectable, and never silently expanded. Every
-meaningful experiment passes: identify target -> verify
-authorization -> verify capability -> verify safety limits ->
-execute -> record."""
+﻿"""Backward-compatible facade over the central capability
+system. The pre-CYR@ permission names (workspace_read,
+experimental_execution, ...) keep working - every call flows
+through environment.capabilities.CapabilitySystem so there is
+exactly ONE authorization ledger. New code should call the
+capability system directly with the canonical capability
+names."""
 from __future__ import annotations
 
-import json
-import time
-from pathlib import Path
+from .capabilities import (CAPABILITIES as _CANONICAL,
+                           ALIASES, AuthorizationError,
+                           CapabilitySystem)
 
-CAPABILITIES = (
-    "workspace_read", "workspace_write", "file_delete",
-    "terminal", "git_write", "network", "device_access",
-    "firmware_tooling", "packet_capture", "experimental_execution",
-    "destructive_operations",
-)
-
-# capabilities that additionally require an explicit per-operation
-# confirmation even when granted
+# the legacy surface (tests + the research orchestrator use it)
+CAPABILITIES = tuple(ALIASES) + tuple(_CANONICAL)
 HIGH_RISK = {"destructive_operations", "device_access",
              "packet_capture"}
 
 
-class AuthorizationError(PermissionError):
-    pass
-
-
 class PermissionSystem:
+    """Facade: grants/checks in legacy names map onto the
+    canonical ledger (see ALIASES)."""
+
     def __init__(self, grants_path, journal=None):
-        self.path = Path(grants_path)
+        self.system = CapabilitySystem(grants_path, journal)
         self.journal = journal
-        self._load()
 
-    def _load(self):
-        if self.path.exists():
-            with open(self.path, encoding="utf-8") as f:
-                self.grants = json.load(f)
-        else:
-            self.grants = {"capabilities": {}}
-
-    def _save(self):
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(self.grants, f, indent=1, sort_keys=True)
-
+    # -------------------------------------------------- facade
     def grant(self, capability: str, scope: str = "*",
               actor: str = "operator") -> dict:
-        if capability not in CAPABILITIES:
-            raise AuthorizationError(
-                f"unknown capability {capability!r}")
-        caps = self.grants["capabilities"]
-        caps.setdefault(capability, []).append({
-            "scope": scope, "actor": actor,
-            "granted_utc": time.strftime(
-                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        })
-        self._save()
-        if self.journal:
-            self.journal.append("authorization_granted",
-                                capability=capability,
-                                scope=scope, actor=actor)
-        return {"capability": capability, "scope": scope,
-                "granted": True}
+        return self.system.grant(capability, "allow_session",
+                                 scope, actor=actor)
+
+    def grant_workspace(self, capability: str, path: str,
+                        actor: str = "operator") -> dict:
+        return self.system.grant(capability,
+                                 "allow_workspace", path,
+                                 actor=actor)
 
     def revoke(self, capability: str) -> dict:
-        self.grants["capabilities"].pop(capability, None)
-        self._save()
-        if self.journal:
-            self.journal.append("authorization_revoked",
-                                capability=capability)
-        return {"capability": capability, "granted": False}
+        return self.system.revoke(capability)
 
     def check(self, capability: str, scope: str = "*",
               confirm_high_risk: bool = False) -> bool:
-        entries = self.grants["capabilities"].get(capability, [])
-        allowed = any(e["scope"] in ("*", scope)
-                     for e in entries)
-        if allowed and capability in HIGH_RISK and \
-                not confirm_high_risk:
+        # legacy high-risk policy runs here; the canonical set's
+        # own confirmation requirement is then satisfied by
+        # construction (this facade has already enforced its
+        # stricter-for-legacy-names gate)
+        if capability in HIGH_RISK and not confirm_high_risk:
+            self._deny_legacy(capability, scope)
             return False
-        return allowed
+        d = self.system.authorize(capability, scope, None,
+                                  confirm_high_risk=True)
+        return d["allowed"]
 
     def require(self, capability: str, scope: str = "*",
                 confirm_high_risk: bool = False):
-        if not self.check(capability, scope, confirm_high_risk):
-            if self.journal:
-                self.journal.append(
-                    "authorization_denied",
-                    capability=capability, scope=scope)
+        if capability in HIGH_RISK and not confirm_high_risk:
+            self._deny_legacy(capability, scope)
             raise AuthorizationError(
-                f"missing authorization: {capability} "
-                f"(scope {scope!r})")
+                f"missing confirmation: {capability} is "
+                f"high-risk")
+        return self.system.require(capability, scope, None,
+                                   confirm_high_risk=True)
+
+    def _deny_legacy(self, capability: str, scope: str):
+        if self.journal:
+            self.journal.append(
+                "authorization_denied",
+                capability=capability, scope=scope,
+                reason="high-risk confirmation required "
+                       "(legacy policy)")
 
     def status(self) -> dict:
+        st = self.system.status()
+        granted = {g["capability"]
+                   for caps in self.system.grants.values()
+                   for g in caps
+                   if g["mode"] != "deny"}
         return {
             "capabilities": {
-                c: bool(v) for c, v in
-                self.grants["capabilities"].items()},
+                c: (ALIASES.get(c, c) in granted)
+                for c in ALIASES},
             "deny_by_default": True,
+            "central_ledger": st,
         }

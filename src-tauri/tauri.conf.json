@@ -1,8 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "VERITAS Environment",
-  "version": "0.1.0",
-  "identifier": "io.github.sinanalekar.veritas-environment",
+  "productName": "CYR@",
+  "mainBinaryName": "cyr",
+  "version": "1.0.0",
+  "identifier": "io.github.sinanalekar.c-ra",
   "build": {
     "beforeDevCommand": "cd ui && npm run dev",
     "devUrl": "http://localhost:5175",
@@ -12,9 +13,9 @@
   "app": {
     "windows": [
       {
-        "title": "VERITAS environment",
-        "width": 1200,
-        "height": 800
+        "title": "CYR@",
+        "width": 1280,
+        "height": 840
       }
     ],
     "security": {

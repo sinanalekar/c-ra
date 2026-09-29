@@ -11,6 +11,8 @@ import json
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from .version import PRODUCT_NAME, \
+    VERSION as __version__
 from .config import Config
 from .journal import Journal
 from .permissions import (CAPABILITIES, AuthorizationError,
@@ -24,9 +26,11 @@ from .orchestrator import Orchestrator
 
 
 class Environment:
-    """Composition root: one object wiring config, journal,
-    permissions, providers, engines, targets, workspace, and the
-    orchestrator."""
+    """Composition root: one object wiring config, journal, the
+    central capability system, providers, engines, targets,
+    workspace, the tool runtimes (terminal/git/browser/
+    computer), the durable task store, memory, artifacts,
+    evidence, and the orchestrator."""
 
     def __init__(self, root: str | None = None):
         self.config = Config(root)
@@ -34,6 +38,7 @@ class Environment:
         self.journal = Journal(self.config.journal_path)
         self.permissions = PermissionSystem(
             self.config.grants_path, self.journal)
+        self.capabilities = self.permissions.system
         self.providers = ProviderStore(
             self.config.providers_path, self.journal)
         self.registry = build_registry(self.config,
@@ -42,15 +47,56 @@ class Environment:
         self.workspace = Workspace(
             self.config.workspace, self.permissions,
             self.journal)
+        from .terminal import TerminalRuntime
+        from .gitops import GitRuntime
+        from .browser import BrowserRuntime
+        from .computer import ComputerRuntime
+        from .tasks import TaskStore
+        from .memory import MemoryStore
+        from .artifacts import ArtifactStore
+        from .evidence import EvidenceStore
+        self.terminal = TerminalRuntime(
+            self.capabilities, self.journal)
+        self.git = GitRuntime(
+            self.capabilities, self.journal)
+        self.browser = BrowserRuntime(
+            self.capabilities, self.journal)
+        self.computer = ComputerRuntime(
+            self.capabilities, self.journal)
+        self.taskstore = TaskStore(
+            self.config.workspace, self.journal)
+        n_loaded = self.taskstore.load()
+        recovered = self.taskstore.recover()
+        self.memory = MemoryStore(
+            self.config.workspace, self.journal)
+        self.artifacts = ArtifactStore(
+            self.config.workspace, self.journal)
+        self.evidence = EvidenceStore(
+            self.config.workspace, self.journal)
+        runtimes = {
+            "workspace": self.workspace,
+            "terminal": self.terminal,
+            "git": self.git,
+            "browser": self.browser,
+            "computer": self.computer,
+            "tasks": self.taskstore,
+            "memory": self.memory,
+            "artifacts": self.artifacts,
+            "evidence": self.evidence,
+        }
         self.orchestrator = Orchestrator(
             self.config, self.registry, self.permissions,
             self.journal, self.targets,
-            provider_store=self.providers)
+            provider_store=self.providers,
+            runtimes=runtimes)
         self.journal.append("session_started",
-                           engines=[
-                               e["name"] for e in
-                               self.registry.describe_all()
-                               if e["available"]])
+                            engines=[
+                                e["name"] for e in
+                                self.registry.describe_all()
+                                if e["available"]],
+                            tasks_loaded=n_loaded,
+                            tasks_recovered=len(
+                                recovered["recovered"]))
 
 
 class TargetQuery(BaseModel):
@@ -108,8 +154,8 @@ class RouteSpec(BaseModel):
 def create_app(env: Environment | None = None) -> FastAPI:
     env = env or Environment()
     app = FastAPI(
-        title="VERITAS environment",
-        version="0.1.0",
+        title=PRODUCT_NAME,
+        version=__version__,
         docs_url="/api/docs",
     )
     app.state.env = env
@@ -190,25 +236,6 @@ def create_app(env: Environment | None = None) -> FastAPI:
     @app.get("/api/research/status")
     def research_status():
         return env.orchestrator.status()
-
-    # ------------------------------------------------ agents
-
-    @app.post("/api/agents/run")
-    def agent_run(t: AgentTask):
-        try:
-            return env.orchestrator.run_agent(
-                t.kind, t.task)
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-
-    @app.get("/api/agents")
-    def agent_status():
-        return env.orchestrator.agent_status()
-
-    @app.get("/api/agents/specs")
-    def agent_specs():
-        from environment.agents import SPECIALISTS
-        return [dict(s) for s in SPECIALISTS.values()]
 
     # ------------------------------------------------ reports
     @app.post("/api/experiments/{exp_id}/report")
@@ -330,4 +357,9 @@ def create_app(env: Environment | None = None) -> FastAPI:
     def coverage():
         return env.targets.coverage_report()
 
+    # ---- runtime endpoints (tasks, terminal, git, browser,
+    #      computer, capabilities, memory, artifacts, evidence,
+    #      agent run controls, model routes)
+    from .api_runtime import register_runtime_endpoints
+    register_runtime_endpoints(app, env)
     return app

@@ -1,6 +1,6 @@
-"""Generate the app icon set (pure stdlib: PNG writer + ICO
-writer) for the Tauri bundle. The mark: a shield chevron on a
-dark slate field with a green verification band."""
+"""Generate the CYR@ app icon set (pure stdlib PNG/ICO
+writers). The mark: a green @ glyph (ring + dot + sweeping
+tail) on a dark slate field - drawn analytically, original."""
 import struct
 import zlib
 
@@ -10,8 +10,7 @@ def png_chunk(tag: bytes, data: bytes) -> bytes:
             struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff))
 
 
-def write_png(path: str, w: int, h: int,
-              pixel) -> None:
+def write_png(path: str, w: int, h: int, pixel) -> None:
     rows = b""
     for y in range(h):
         rows += b"\x00"
@@ -26,58 +25,71 @@ def write_png(path: str, w: int, h: int,
         f.write(blob)
 
 
-def lerp(a, b, t):
-    return tuple(int(a[i] + (b[i] - a[i]) * t)
-                 for i in range(3))
+SLATE = (14, 18, 24)
+GREEN = (108, 214, 138)
+EDGE = (44, 52, 66)
 
 
-SLATE = (16, 20, 26)
-GREEN = (111, 208, 140)
-EDGE = (42, 49, 64)
-
-
-def shield(x, y, w, h):
-    """A simple shield silhouette: rounded top, tapering
-    bottom point."""
-    cx = w / 2
-    ny = (y - h * 0.14) / (h * 0.72)     # 0 top, 1 tip
-    if ny < 0 or ny > 1:
-        return False
-    # half-width shrinks from 0.36w at top to a point at tip
-    hw = (0.36 - 0.34 * ny ** 1.6) * w
-    if abs(x - cx) > hw:
-        return False
-    # rounded top corners
-    top_r = 0.10 * h
-    if y < h * 0.14 + top_r:
-        dx = abs(x - cx) - (0.36 * w - top_r)
-        dy = (h * 0.14 + top_r) - y
-        if dx > 0 and dx ** 2 + dy ** 2 > top_r ** 2:
-            return False
-    return True
+def _bezier_samples(p0, p1, p2, n=80):
+    return [(p0[0] + (p1[0] - p0[0]) * 2 * t * (1 - t) +
+             (p2[0] - p0[0]) * t * t,
+             p0[1] + (p1[1] - p0[1]) * 2 * t * (1 - t) +
+             (p2[1] - p0[1]) * t * t)
+            for t in (i / n for i in range(n + 1))]
 
 
 def pixel_fn(w, h):
+    s = min(w, h)
+    cx = w * 0.5
+    cy = h * 0.44
+    r = s * 0.21          # ring radius
+    th = s * 0.055        # stroke thickness
+    dot = s * 0.045       # center dot radius
+    # the @ tail: from the ring's right side, sweeping down-left
+    tail = _bezier_samples(
+        (cx + r * 0.95, cy),
+        (cx + r * 1.7, cy + r * 0.9),
+        (cx - r * 0.15, cy + r * 1.85))
+    # subtle corner accent lines
+    m = s * 0.09
+
     def px(x, y):
-        if shield(x, y, w, h):
-            # verification band across the shield
-            band_top = h * 0.44
-            band_bot = h * 0.56
-            if band_top <= y <= band_bot:
-                c = GREEN
-            else:
-                t = y / h
-                c = lerp((30, 37, 49), (22, 27, 36), t)
-            return (*c, 255)
-        # field
+        # background: vertical slate gradient
         t = y / h
-        c = lerp(SLATE, (12, 15, 20), t)
-        return (*c, 255)
+        base = tuple(int(SLATE[i] + (10 - SLATE[i]) * -0.2 * t)
+                     for i in range(3))
+        d_ring = abs(((x - cx) ** 2 + (y - cy) ** 2) ** 0.5 - r)
+        d_dot = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+        d_tail = min((x - tx) ** 2 + (y - ty) ** 2
+                     for tx, ty in tail) ** 0.5
+        # top-left / bottom-right corner accents
+        corner_tl = (x < m and y < m) and \
+            (x + y < m * 1.4)
+        corner_br = (x > w - m and y > h - m) and \
+            ((w - x) + (h - y) < m * 1.4)
+        if d_ring < th or d_dot < dot or d_tail < th:
+            return (*GREEN, 255)
+        if corner_tl or corner_br:
+            return (*EDGE, 255)
+        return (*base, 255)
     return px
 
 
+def png_blob(w, h):
+    rows = b""
+    px = pixel_fn(w, h)
+    for y in range(h):
+        rows += b"\x00"
+        for x in range(w):
+            rows += bytes(px(x, y))
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" +
+            png_chunk(b"IHDR", ihdr) +
+            png_chunk(b"IDAT", zlib.compress(rows, 9)) +
+            png_chunk(b"IEND", b""))
+
+
 def write_ico(path: str, pngs: list) -> None:
-    """ICO container wrapping PNG images (Vista+ format)."""
     n = len(pngs)
     header = struct.pack("<HHH", 0, 1, n)
     entries = b""
@@ -94,29 +106,6 @@ def write_ico(path: str, pngs: list) -> None:
         f.write(header + entries + body)
 
 
-def png_blob(w, h):
-    import io
-    buf = io.BytesIO()
-
-    class Fake:
-        def write(self, b):
-            buf.write(b)
-            return len(b)
-    # reuse write_png into a buffer
-    rows = b""
-    px = pixel_fn(w, h)
-    for y in range(h):
-        rows += b"\x00"
-        for x in range(w):
-            rows += bytes(px(x, y))
-    ihdr = struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)
-    blob = (b"\x89PNG\r\n\x1a\n" +
-            png_chunk(b"IHDR", ihdr) +
-            png_chunk(b"IDAT", zlib.compress(rows, 9)) +
-            png_chunk(b"IEND", b""))
-    return blob
-
-
 if __name__ == "__main__":
     import os
     d = os.path.join(os.path.dirname(__file__),
@@ -129,8 +118,8 @@ if __name__ == "__main__":
         write_png(os.path.join(d, name), w, h,
                   pixel_fn(w, h))
         print("wrote", name)
-    blobs = [(32, 32, png_blob(32, 32)),
-             (128, 128, png_blob(128, 128)),
-             (256, 256, png_blob(256, 256))]
-    write_ico(os.path.join(d, "icon.ico"), blobs)
-    print("wrote icon.ico")
+    write_ico(os.path.join(d, "icon.ico"), [
+        (32, 32, png_blob(32, 32)),
+        (128, 128, png_blob(128, 128)),
+        (256, 256, png_blob(256, 256))])
+    print("wrote icon.ico (CYR@ mark)")

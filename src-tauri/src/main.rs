@@ -1,9 +1,8 @@
-// VERITAS environment desktop shell (Tauri 2).
+// CYR@ desktop shell (Tauri 2).
 //
-// Launches the local research backend as a sidecar process
-// bound to 127.0.0.1 only, then opens the research console.
-// The sidecar is killed on app exit. No network exposure: the
-// window talks to the loopback backend.
+// Launches the local agent backend as a sidecar process bound
+// to 127.0.0.1 only, then opens the CYR@ console. The sidecar
+// is killed on app exit (no orphan processes). Loopback-only.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::process::{Command, Child};
@@ -17,7 +16,7 @@ fn sidecar_workspace() -> String {
     }
     let base = std::env::var("APPDATA")
         .map(|a| std::path::PathBuf::from(a)
-             .join("veritas-environment")
+             .join("cyr")
              .join("workspace"))
         .unwrap_or_else(|_| {
             std::path::PathBuf::from("workspace") });
@@ -36,8 +35,7 @@ fn spawn_sidecar() {
     if let Ok(entries) = std::fs::read_dir(&exe_dir) {
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with("veritas-backend") && name.ends_with(".exe")
-                && !name.starts_with("veritas-environment") {
+            if name.starts_with("veritas-backend") && name.ends_with(".exe") {
                 found = Some(e.path());
                 break;
             }
@@ -75,7 +73,7 @@ fn main() {
     spawn_sidecar();
     tauri::Builder::default()
         .build(tauri::generate_context!())
-        .expect("error while running veritas environment")
+        .expect("error while running CYR@")
         .run(|_app_handle, event| {
             if let tauri::RunEvent::Exit = event {
                 kill_sidecar();

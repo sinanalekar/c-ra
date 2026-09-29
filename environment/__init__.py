@@ -1,9 +1,9 @@
-"""VERITAS environment: local-first autonomous security-research
-operating environment.
+﻿"""CYR@ - local-first desktop agent harness.
 
-Coordinator + evidence judge + falsification gates + provenance,
-wrapping five first-class research engines (VERITAS, CIDER,
-Frontier, HYDRA, SEEK) behind a common interface. Honest by
-construction: unavailable engines report unavailable, missing
-authorization blocks, failed experiments record failed."""
-__version__ = "0.1.0"
+Coordinator + central authorization + tool runtimes + durable
+tasks + multi-agent specialists + the five security-research
+engines (VERITAS, CIDER, SEEK, HYDRA, Frontier) as first-class
+internal engines."""
+from .version import VERSION, PRODUCT_NAME, MACHINE_NAME
+
+__version__ = VERSION

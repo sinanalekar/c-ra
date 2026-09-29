@@ -1,4 +1,4 @@
-"""Server entry: localhost-only uvicorn launcher. Imports the
+﻿"""Server entry: localhost-only uvicorn launcher. Imports the
 app factory directly (no string imports - keeps the PyInstaller
 sidecar working)."""
 from __future__ import annotations
@@ -6,6 +6,7 @@ from __future__ import annotations
 import uvicorn
 
 from .app import create_app
+from .version import PRODUCT_NAME
 
 
 def main():

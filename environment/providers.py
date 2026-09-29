@@ -13,8 +13,10 @@ import json
 import time
 from pathlib import Path
 
-ROLES = ("coordinator", "reasoning", "coding", "research",
-         "independent_reviewer", "falsification_reviewer")
+ROLES = ("coordinator", "planner", "reasoning", "coding",
+         "research", "browser", "terminal", "reviewer",
+         "independent_reviewer", "falsification_reviewer",
+         "report_writer", "security_researcher")
 
 PROVIDER_SCHEMA_FIELDS = (
     "name", "base_url", "api_format", "auth", "model_ids",
@@ -92,25 +94,76 @@ class ProviderStore:
         return {"provider": name, "configured": True}
 
     def bind_role(self, role: str, provider: str,
-                  model_id: str) -> dict:
+                  model_id: str,
+                  timeout: int = 120,
+                  retries: int = 1,
+                  streaming: bool = False,
+                  fallback_provider: str = "",
+                  fallback_model: str = "") -> dict:
         if role not in ROLES:
             raise ValueError(f"unknown role {role!r}")
         if provider not in self.config["providers"]:
             raise ValueError(
                 f"provider {provider!r} not configured")
+        if fallback_provider and \
+                fallback_provider not in \
+                self.config["providers"]:
+            raise ValueError(
+                f"fallback provider {fallback_provider!r} "
+                f"not configured")
         self.config["role_bindings"][role] = {
-            "provider": provider, "model_id": model_id}
+            "provider": provider, "model_id": model_id,
+            "timeout": timeout, "retries": retries,
+            "streaming": streaming,
+            "fallback_provider": fallback_provider,
+            "fallback_model": fallback_model}
         self._save()
+        if self.journal:
+            self.journal.append("role_bound", role=role,
+                                provider=provider,
+                                model_id=model_id)
         return {"role": role, "provider": provider,
                 "model_id": model_id}
+
+    def resolve_role(self, role: str,
+                     override: dict | None = None) -> dict:
+        """Effective route for a role, honoring a per-task model
+        override. Returns LOCAL when unconfigured - honestly."""
+        binding = self.config["role_bindings"].get(role) or {}
+        if override:
+            binding = {**binding, **override}
+        if not binding.get("provider"):
+            return {"mode": "LOCAL",
+                    "note": "role unconfigured; LOCAL "
+                            "deterministic policy"}
+        provider = self.config["providers"].get(
+            binding["provider"])
+        if provider is None or provider.get("disabled"):
+            return {"mode": "LOCAL",
+                    "note": "provider missing or disabled"}
+        if not self.get_api_key(binding["provider"]):
+            return {"mode": "LOCAL",
+                    "note": "provider configured but API key "
+                            "missing"}
+        return {"mode": "remote", **binding,
+                "base_url": provider["base_url"],
+                "api_format": provider["api_format"]}
+
+    def set_provider_state(self, name: str,
+                           enabled: bool) -> dict:
+        if name not in self.config["providers"]:
+            raise ValueError(
+                f"provider {name!r} not configured")
+        self.config["providers"][name]["disabled"] = \
+            not enabled
+        self._save()
+        return {"provider": name, "enabled": enabled}
 
     def role_status(self) -> dict:
         out = {}
         for role in ROLES:
             b = self.config["role_bindings"].get(role)
-            out[role] = ({"provider": b["provider"],
-                          "model_id": b["model_id"]}
-                         if b else
+            out[role] = (dict(b) if b else
                          {"provider": "LOCAL (unconfigured)",
                           "model_id": None})
         return out

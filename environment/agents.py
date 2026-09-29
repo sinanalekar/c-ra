@@ -43,6 +43,71 @@ class AgentSpec(dict):
 
 
 SPECIALISTS = {
+    "coordinator": AgentSpec.make(
+        "coordinator",
+        "understand the objective, verify scope, recall "
+        "memory, and delegate (the task-level brain)",
+        allowed_tools=("targets", "routing", "memory"),
+        authorization=(),
+        inputs=("objective",),
+        outputs=("plan", "delegation")),
+    "planner": AgentSpec.make(
+        "planner",
+        "produce an ordered, inspectable plan for a task",
+        allowed_tools=("targets", "routing"),
+        authorization=(),
+        inputs=("objective",),
+        outputs=("plan",)),
+    "researcher": AgentSpec.make(
+        "researcher",
+        "search memory, evidence, and (authorized) the web",
+        allowed_tools=("memory", "evidence", "browser"),
+        authorization=("browser.read",
+                      "browser.navigate"),
+        inputs=("query",),
+        outputs=("findings",)),
+    "coding_agent": AgentSpec.make(
+        "coding_agent",
+        "inspect and modify authorized files, run tests",
+        allowed_tools=("workspace", "terminal"),
+        authorization=("filesystem.read",
+                      "filesystem.write",
+                      "terminal.execute"),
+        inputs=("path", "content", "run_tests"),
+        outputs=("patch", "test_result")),
+    "terminal_agent": AgentSpec.make(
+        "terminal_agent",
+        "execute authorized commands with live streaming "
+        "and checkpointed observation",
+        allowed_tools=("terminal",),
+        authorization=("terminal.execute",),
+        inputs=("shell", "command", "workdir"),
+        outputs=("command_output",)),
+    "browser_agent": AgentSpec.make(
+        "browser_agent",
+        "navigate, extract, and record web research within "
+        "authorization",
+        allowed_tools=("browser",),
+        authorization=("browser.read",
+                      "browser.navigate"),
+        inputs=("url",),
+        outputs=("extraction",)),
+    "security_researcher": AgentSpec.make(
+        "security_researcher",
+        "run the VERITAS research loop on a target through "
+        "the engine adapters",
+        allowed_tools=("targets", "engines", "evidence"),
+        authorization=("research.execute",),
+        inputs=("target_id", "vulnerability_class"),
+        outputs=("disposition",)),
+    "recovery_agent": AgentSpec.make(
+        "recovery_agent",
+        "resume interrupted/recovering tasks from their "
+        "last checkpoint",
+        allowed_tools=("tasks",),
+        authorization=(),
+        inputs=("task_id",),
+        outputs=("resumed",)),
     "hypothesis_generator": AgentSpec.make(
         "hypothesis_generator",
         "generate falsifiable hypotheses from a target's "
@@ -61,8 +126,9 @@ SPECIALISTS = {
         outputs=("experiment_plan",)),
     "hypothesis_challenger": AgentSpec.make(
         "hypothesis_challenger",
-        "attack the hypothesis: enumerate alternate/environmental/"
-        "tooling explanations and demand the falsifiers for each",
+        "attack the hypothesis: enumerate alternate/"
+        "environmental/tooling explanations and demand the "
+        "falsifiers for each",
         allowed_tools=(),
         authorization=(),
         inputs=("hypothesis", "evidence"),
@@ -71,7 +137,7 @@ SPECIALISTS = {
         "evidence_reviewer",
         "audit the evidence objects against the five-state "
         "matrix (PROVEN/CORROBORATED/INFERRED)",
-        allowed_tools=(),
+        allowed_tools=("evidence",),
         authorization=(),
         inputs=("experiment",),
         outputs=("evidence_matrix",)),
@@ -80,13 +146,13 @@ SPECIALISTS = {
         "independently reproduce the experiment result and "
         "characterize variance",
         allowed_tools=("engines",),
-        authorization=("experimental_execution",),
+        authorization=("research.execute",),
         inputs=("experiment",),
         outputs=("reproduction_record",)),
     "report_writer": AgentSpec.make(
         "report_writer",
-        "produce the full section-39 report; never exaggerate "
-        "impact; list what was NOT demonstrated",
+        "produce the full disclosure-grade report; never "
+        "exaggerate impact; list what was NOT demonstrated",
         allowed_tools=("journal",),
         authorization=(),
         inputs=("experiment", "review_pipeline"),
@@ -95,8 +161,8 @@ SPECIALISTS = {
         "artifact_analyst",
         "inventory and verify research artifacts (hashes, "
         "provenance)",
-        allowed_tools=("workspace",),
-        authorization=("workspace_read",),
+        allowed_tools=("workspace", "artifacts"),
+        authorization=("filesystem.read",),
         inputs=("artifacts",),
         outputs=("artifact_inventory",)),
     "firmware_analyst": AgentSpec.make(
@@ -104,23 +170,24 @@ SPECIALISTS = {
         "route firmware/kernel questions to HYDRA; keep all "
         "output STATIC_CANDIDATE",
         allowed_tools=("hydra",),
-        authorization=("firmware_tooling",
-                       "experimental_execution"),
+        authorization=("filesystem.execute",
+                       "research.execute"),
         inputs=("kernelcache_artifact",),
         outputs=("static_candidates",)),
     "network_researcher": AgentSpec.make(
         "network_researcher",
-        "route authorized endpoint/protocol experiments to SEEK "
-        "within exact scope",
+        "route authorized endpoint/protocol experiments to "
+        "SEEK within exact scope",
         allowed_tools=("seek",),
-        authorization=("network", "experimental_execution"),
+        authorization=("network.request",
+                       "research.execute"),
         inputs=("authorized_scope",),
         outputs=("observation",)),
     "fuzzing_researcher": AgentSpec.make(
         "fuzzing_researcher",
         "route fuzzing/invariant experiments to CIDER",
         allowed_tools=("cider",),
-        authorization=("experimental_execution",),
+        authorization=("research.execute",),
         inputs=("hypothesis",),
         outputs=("engine_result",)),
     "method_researcher": AgentSpec.make(
@@ -128,7 +195,7 @@ SPECIALISTS = {
         "route method-invention requests to Frontier when "
         "existing methods are insufficient",
         allowed_tools=("frontier",),
-        authorization=("experimental_execution",),
+        authorization=("research.execute",),
         inputs=("method_question",),
         outputs=("method_result",)),
 }
@@ -143,11 +210,19 @@ REVIEW_PIPELINE = ("researcher", "independent_reviewer",
 class AgentRun:
     """One inspectable, controllable specialist execution."""
 
-    def __init__(self, agent_kind, task, journal=None):
+    def __init__(self, agent_kind, task, journal=None,
+                 run_id=None, task_id=None,
+                 model_route=None):
         self.spec = SPECIALISTS[agent_kind]
         self.agent_kind = agent_kind
         self.task = task
         self.journal = journal
+        self.run_id = run_id or \
+            f"run-{agent_kind[:3]}-{int(time.time() *
+                                        1000) % 10**9:09d}"
+        self.task_id = task_id
+        self.model_route = model_route or {
+            "mode": "LOCAL"}
         self.steps: list[dict] = []
         self.state = "READY"    # READY/RUNNING/PAUSED/DONE/
                                 # FAILED/STOPPED
@@ -183,7 +258,9 @@ class AgentRun:
             self.journal.append("agent_step", **rec)
 
     def checkpoint(self):
-        """Consult the control flag between steps."""
+        """Consult the control flag between steps; records a
+        real checkpoint entry."""
+        self._step("checkpoint")
         if self._control == "stop":
             self.state = "STOPPED"
             raise _AgentStopped()
@@ -196,11 +273,17 @@ class AgentRun:
             raise _AgentStopped("max_steps exceeded")
 
     def inspect(self) -> dict:
-        return {"agent": self.agent_kind,
+        return {"run_id": self.run_id,
+                "agent": self.agent_kind,
                 "purpose": self.spec["purpose"],
                 "state": self.state,
                 "steps": self.steps,
                 "task": self.task,
+                "task_id": self.task_id,
+                "model_route": self.model_route,
+                "checkpoints": [s for s in self.steps
+                                if s.get("step") ==
+                                "checkpoint"],
                 "result": self.result}
 
 
