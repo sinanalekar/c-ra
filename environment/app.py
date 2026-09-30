@@ -97,10 +97,25 @@ class Environment:
                             tasks_loaded=n_loaded,
                             tasks_recovered=len(
                                 recovered["recovered"]))
-        # provider discovery runs at SERVER startup (not on
-        # every Environment construction - it performs live
-        # /models catalog fetches); see environment.server
+        # provider discovery runs in the background once the
+        # server listens (see environment.server) - the API is
+        # never blocked behind catalog fetches
         self.discovery = None
+        # first-run defaults: the standard local working set is
+        # granted for the session so the app works out of the
+        # box (recorded in the journal; revocable in Settings;
+        # destructive capabilities still require confirmation)
+        if not any(self.capabilities.grants.values()):
+            from .capabilities import \
+                DEFAULT_GRANTS
+            for cap in DEFAULT_GRANTS:
+                self.capabilities.grant(
+                    cap, "allow_session",
+                    actor="first-run default")
+            self.journal.append(
+                "first_run_default_grants",
+                capabilities=list(
+                    DEFAULT_GRANTS))
 
 
 class TargetQuery(BaseModel):

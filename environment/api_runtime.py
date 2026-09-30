@@ -158,6 +158,16 @@ def register_runtime_endpoints(app, env):
     journal = env.journal
     orch = env.orchestrator
 
+    # ================================================ health
+    @app.get("/api/health")
+    def health():
+        """Immediate availability probe (never blocked behind
+        provider discovery)."""
+        return {"status": "ok",
+                "product": "CYR@",
+                "discovery_running":
+                    env.discovery is None}
+
     # ================================================ chat
     from .chat import ChatEngine
     chat = ChatEngine(env)
@@ -374,6 +384,13 @@ def register_runtime_endpoints(app, env):
             raise HTTPException(400, str(e))
         return {"task_id": task_id,
                 "state": "cancelled"}
+
+    @app.delete("/api/tasks/{task_id}")
+    def task_delete(task_id: str):
+        rec = env.taskstore.remove(task_id)
+        if "error" in rec:
+            raise HTTPException(404, rec["error"])
+        return rec
 
     @app.post("/api/tasks/{task_id}/redirect")
     def task_redirect(task_id: str,

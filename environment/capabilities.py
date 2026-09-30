@@ -46,6 +46,22 @@ HIGH_RISK = ("filesystem.delete", "computer.interact",
              "browser.download", "browser.upload",
              "git.push")
 
+# The standard local working set, granted by default on first
+# run (session mode) so the app works out of the box - the
+# journal records it, Settings shows it, and every high-risk
+# operation (push, delete, computer control) still requires
+# per-operation confirmation.
+DEFAULT_GRANTS = (
+    "filesystem.read", "filesystem.write",
+    "filesystem.execute",
+    "terminal.execute", "git.read", "git.write",
+    "browser.read", "browser.navigate",
+    "browser.interact",
+    "research.execute",
+    "engine.veritas", "engine.cider", "engine.seek",
+    "engine.hydra", "engine.frontier",
+)
+
 # legacy aliases (the pre-CYR@ permission names kept working so
 # existing callers and tests flow through the same ledger)
 ALIASES = {

@@ -62,6 +62,10 @@ class TestAPI(unittest.TestCase):
                            "INCONCLUSIVE"))
 
     def test_run_blocked_without_grant(self):
+        # first-run defaults grant the working set; a user who
+        # revokes everything is denied (deny-by-default ledger)
+        for cap in ("research.execute",):
+            self.env.capabilities.revoke(cap)
         r = self.client.post("/api/hypotheses", json={
             "claim": "x", "target_id":
             "T-authentication-face-id",
@@ -73,13 +77,17 @@ class TestAPI(unittest.TestCase):
         self.assertEqual(body["disposition"], "BLOCKED")
 
     def test_workspace_requires_permissions(self):
+        # first-run defaults include filesystem access; revoke
+        # it and the workspace is denied (deny-by-default)
+        self.env.capabilities.revoke("filesystem.read")
+        self.env.capabilities.revoke("filesystem.write")
         r = self.client.post("/api/workspace/write",
                             json={"path": "a.txt",
                                   "content": "x"})
         self.assertEqual(r.status_code, 403)
         self.client.post("/api/authorization/grant",
                         json={"capability":
-                              "workspace_write"})
+                              "filesystem.write"})
         r = self.client.post("/api/workspace/write",
                             json={"path": "a.txt",
                                   "content": "x"})

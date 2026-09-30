@@ -162,6 +162,28 @@ class TaskStore:
                 for _, t in
                 sorted(self.tasks.items())[-limit:]]
 
+    def remove(self, task_id: str) -> dict:
+        """Remove a task from the store + disk. Cancels a
+        running process-backed task first if needed."""
+        t = self.tasks.get(task_id)
+        if t is None:
+            return {"error": "unknown task"}
+        if t.data["state"] in ("running", "planning",
+                               "waiting_for_user"):
+            try:
+                t.transition("cancelled",
+                             "removed by user")
+            except TaskError:
+                pass
+        self.tasks.pop(task_id, None)
+        p = self.tasks_dir / f"{task_id}.json"
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        self._journal("task_removed", task_id=task_id)
+        return {"removed": task_id}
+
     # ------------------------------------------------ recovery
     def recover(self) -> dict:
         """Boot-time recovery: tasks persisted as running/

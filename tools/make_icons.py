@@ -1,6 +1,7 @@
-"""Generate the CYR@ app icon set (pure stdlib PNG/ICO
-writers). The mark: a green @ glyph (ring + dot + sweeping
-tail) on a dark slate field - drawn analytically, original."""
+"""Generate the CYR@ app icon set (pure stdlib): a modern
+squircle badge with a teal-emerald gradient and a bold open
+ring + core mark (the agent glyph). Supersampled 4x for clean
+anti-aliased edges at every size."""
 import struct
 import zlib
 
@@ -8,6 +9,112 @@ import zlib
 def png_chunk(tag: bytes, data: bytes) -> bytes:
     return (struct.pack(">I", len(data)) + tag + data +
             struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff))
+
+
+def _lerp(a, b, t):
+    return tuple(int(a[i] + (b[i] - a[i]) * t)
+                 for i in range(3))
+
+
+TEAL = (34, 197, 160)
+EMERALD = (13, 148, 116)
+DEEP = (7, 40, 36)
+RING = (233, 253, 247)     # near-white mark
+CORE = (52, 226, 178)     # bright core dot
+
+
+def _squircle_inside(x, y, w, h):
+    """Rounded-rect coverage (superellipse-ish corner radius).
+    Returns True if the pixel is inside the badge."""
+    r = w * 0.225
+    if x < r:
+        cx, cy = r, r
+        if y < r:
+            return (x - cx) ** 2 + (y - cy) ** 2 <= r * r
+        if y > h - r:
+            return (x - cx) ** 2 + \
+                   (y - (h - r)) ** 2 <= r * r
+    if x > w - r:
+        if y < r:
+            return (x - (w - r)) ** 2 + \
+                   (y - r) ** 2 <= r * r
+        if y > h - r:
+            return (x - (w - r)) ** 2 + \
+                   (y - (h - r)) ** 2 <= r * r
+    return True
+
+
+def pixel_fn(w, h):
+    """Render at 4x supersampling for smooth edges (bezier
+    tail precomputed once per image, not per pixel)."""
+    ss = 4
+    cx, cy = 0.44 * w, 0.46 * h
+    R = 0.27 * w
+    th = 0.075 * w
+    core = 0.105 * w
+    tail = _bezier(
+        (cx + R * 0.97, cy + th * 0.4),
+        (cx + R * 1.05, cy + R * 1.15),
+        (cx - R * 0.1, cy + R * 1.05), 72)
+    tail_th = th * 0.95
+
+    def shade(fx, fy):
+        x, y = fx * w, fy * h
+        if not _squircle_inside(x, y, w, h):
+            return (0, 0, 0, 0)      # transparent outside
+        g = fx * 0.45 + fy * 0.55
+        if g < 0.5:
+            base = _lerp(TEAL, EMERALD, g * 2)
+        else:
+            base = _lerp(EMERALD, DEEP,
+                         (g - 0.5) * 2)
+        sheen = max(0.0, 1 - (fx + fy) * 1.2) * 22
+        base = tuple(min(255,
+                         int(c + sheen))
+                     for c in base)
+        dx = x - cx
+        dy = y - cy
+        d = (dx * dx + dy * dy) ** 0.5
+        ang = _angle(dx, dy)
+        in_gap = -0.38 < ang < 0.38
+        if abs(d - R) < th and not in_gap:
+            return (*RING, 255)
+        if d < core:
+            return (*CORE, 255)
+        if d > R - th and d < R + R * 0.9 and not in_gap:
+            pass
+        for px, py in tail:
+            ddx = x - px
+            ddy = y - py
+            if ddx * ddx + ddy * ddy < tail_th * tail_th:
+                return (*RING, 255)
+        return (*base, 255)
+
+    def px(x, y):
+        r = g = b = a = 0
+        for sy in range(ss):
+            for sx in range(ss):
+                c = shade((x + (sx + 0.5) / ss) / w,
+                          (y + (sy + 0.5) / ss) / h)
+                r += c[0]; g += c[1]; b += c[2]; a += c[3]
+        n = ss * ss
+        return (r // n, g // n, b // n, a // n)
+    return px
+
+
+import math
+
+
+def _angle(dx, dy):
+    return math.atan2(dy, dx)
+
+
+def _bezier(p0, p1, p2, n):
+    return [(p0[0] + (p1[0] - p0[0]) * 2 * t * (1 - t) +
+             (p2[0] - p0[0]) * t * t,
+             p0[1] + (p1[1] - p0[1]) * 2 * t * (1 - t) +
+             (p2[1] - p0[1]) * t * t)
+            for t in (i / n for i in range(n + 1))]
 
 
 def write_png(path: str, w: int, h: int, pixel) -> None:
@@ -23,56 +130,6 @@ def write_png(path: str, w: int, h: int, pixel) -> None:
             png_chunk(b"IEND", b""))
     with open(path, "wb") as f:
         f.write(blob)
-
-
-SLATE = (14, 18, 24)
-GREEN = (108, 214, 138)
-EDGE = (44, 52, 66)
-
-
-def _bezier_samples(p0, p1, p2, n=80):
-    return [(p0[0] + (p1[0] - p0[0]) * 2 * t * (1 - t) +
-             (p2[0] - p0[0]) * t * t,
-             p0[1] + (p1[1] - p0[1]) * 2 * t * (1 - t) +
-             (p2[1] - p0[1]) * t * t)
-            for t in (i / n for i in range(n + 1))]
-
-
-def pixel_fn(w, h):
-    s = min(w, h)
-    cx = w * 0.5
-    cy = h * 0.44
-    r = s * 0.21          # ring radius
-    th = s * 0.055        # stroke thickness
-    dot = s * 0.045       # center dot radius
-    # the @ tail: from the ring's right side, sweeping down-left
-    tail = _bezier_samples(
-        (cx + r * 0.95, cy),
-        (cx + r * 1.7, cy + r * 0.9),
-        (cx - r * 0.15, cy + r * 1.85))
-    # subtle corner accent lines
-    m = s * 0.09
-
-    def px(x, y):
-        # background: vertical slate gradient
-        t = y / h
-        base = tuple(int(SLATE[i] + (10 - SLATE[i]) * -0.2 * t)
-                     for i in range(3))
-        d_ring = abs(((x - cx) ** 2 + (y - cy) ** 2) ** 0.5 - r)
-        d_dot = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
-        d_tail = min((x - tx) ** 2 + (y - ty) ** 2
-                     for tx, ty in tail) ** 0.5
-        # top-left / bottom-right corner accents
-        corner_tl = (x < m and y < m) and \
-            (x + y < m * 1.4)
-        corner_br = (x > w - m and y > h - m) and \
-            ((w - x) + (h - y) < m * 1.4)
-        if d_ring < th or d_dot < dot or d_tail < th:
-            return (*GREEN, 255)
-        if corner_tl or corner_br:
-            return (*EDGE, 255)
-        return (*base, 255)
-    return px
 
 
 def png_blob(w, h):
@@ -122,4 +179,4 @@ if __name__ == "__main__":
         (32, 32, png_blob(32, 32)),
         (128, 128, png_blob(128, 128)),
         (256, 256, png_blob(256, 256))])
-    print("wrote icon.ico (CYR@ mark)")
+    print("wrote icon.ico (gradient squircle mark)")
