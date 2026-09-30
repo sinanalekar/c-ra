@@ -179,6 +179,25 @@ def create_app(env: Environment | None = None) -> FastAPI:
     )
     app.state.env = env
 
+    # CORS: the packaged Tauri shell serves the UI from
+    # tauri://localhost / http://tauri.localhost while the API
+    # binds 127.0.0.1:8765 - cross-origin, so the browser
+    # preflights every request. Allow exactly the local shell
+    # + dev origins (never arbitrary external sites).
+    from fastapi.middleware.cors import CORSMiddleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "tauri://localhost",
+            "http://tauri.localhost",
+            "http://localhost:5175",
+            "http://127.0.0.1:5175",
+        ],
+        allow_methods=["GET", "POST", "DELETE",
+                       "PUT", "OPTIONS"],
+        allow_headers=["Content-Type"],
+    )
+
     # ------------------------------------------------ session
     @app.get("/api/status")
     def status():
