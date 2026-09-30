@@ -201,28 +201,45 @@ def register_runtime_endpoints(app, env):
     @app.get("/api/models/list")
     def models_list():
         """The model picker data: LOCAL + every configured
-        provider's model ids + role bindings."""
+        provider's model ids (with display names + context
+        limits where known) + role bindings."""
         providers = []
         for name, spec in \
                 env.providers.config[
                     "providers"].items():
             providers.append({
                 "name": name,
+                "label": spec.get("label")
+                         or name,
                 "base_url": spec["base_url"],
                 "disabled": bool(
                     spec.get("disabled")),
                 "has_key": bool(
                     env.providers.get_api_key(
                         name)),
-                "models": spec.get("model_ids"
-                                   ) or [],
+                "models": spec.get("model_ids")
+                           or [],
+                "model_info":
+                    spec.get("model_info") or {},
             })
         return {
             "local_mode": True,
             "providers": providers,
             "role_bindings":
                 env.providers.role_status(),
+            "discovery": getattr(
+                env, "discovery", None),
         }
+
+    @app.post("/api/providers/discover")
+    def providers_discover():
+        """Re-run provider auto-discovery (env vars, opencode
+        config, live /models catalogs)."""
+        from .provider_discovery import autodiscover
+        out = autodiscover(env.providers,
+                           env.journal)
+        env.discovery = out
+        return out
 
     class ProviderTest(BaseModel):
         name: str
@@ -286,9 +303,13 @@ def register_runtime_endpoints(app, env):
                                  "refused"))
         # record the picker-visible model ids in the provider
         if spec.models:
-            env.providers.config["providers"][
-                spec.spec["name"]][
-                "model_ids"] = spec.models
+            prov = env.providers.config[
+                "providers"][spec.spec["name"]]
+            prov["model_ids"] = spec.models
+            prov["model_info"] = {
+                m: prov.get("model_info", {}).get(
+                    m, {"name": m})
+                for m in spec.models}
             env.providers._save()
         return {"provider": spec.spec["name"],
                 "configured": True,

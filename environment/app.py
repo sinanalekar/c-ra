@@ -97,6 +97,10 @@ class Environment:
                             tasks_loaded=n_loaded,
                             tasks_recovered=len(
                                 recovered["recovered"]))
+        # provider discovery runs at SERVER startup (not on
+        # every Environment construction - it performs live
+        # /models catalog fetches); see environment.server
+        self.discovery = None
 
 
 class TargetQuery(BaseModel):

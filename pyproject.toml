@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cyr"
-version = "1.1.0"
+version = "1.1.1"
 description = "CYR@ - local-first desktop agent harness for authorized security research"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["fastapi>=0.110", "uvicorn>=0.29"]
+dependencies = ["fastapi>=0.110", "uvicorn>=0.29", "keyring>=24"]
 
 [project.scripts]
 cyr = "environment.server:main"

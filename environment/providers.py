@@ -83,6 +83,16 @@ class ProviderStore:
             raise ValueError("base_url must be https")
         name = spec["name"]
         spec = {k: spec.get(k) for k in PROVIDER_SCHEMA_FIELDS}
+        # preserve discovery-added extras (model_ids,
+        # model_info, label) when refreshing a provider
+        if name in self.config["providers"]:
+            extras = {
+                k: v for k, v in
+                self.config["providers"][name].items()
+                if k not in PROVIDER_SCHEMA_FIELDS}
+            spec = {**self.config[
+                        "providers"][name], **spec,
+                    **extras}
         self.config["providers"][name] = spec
         self._save()
         if self.journal:

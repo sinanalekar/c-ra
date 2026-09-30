@@ -57,6 +57,7 @@ type ModelPick = { provider: string; model_id: string } | null;
 type ProviderRec = {
   name: string; base_url: string; disabled: boolean;
   has_key: boolean; models: string[];
+  label?: string; model_info?: Record<string, any>;
 };
 
 /* ---------------------------------------------- mini-markdown */
@@ -320,21 +321,41 @@ function SettingsModal({ t, close, onProvidersChanged }: {
 
         {/* providers */}
         <div style={{ fontSize: 11, textTransform: "uppercase",
-                      letterSpacing: 1, color: t.dim, margin: "4px 0 8px" }}>
-          providers (OpenAI-compatible)</div>
+                      letterSpacing: 1, color: t.dim, margin: "4px 0 8px",
+                      display: "flex", alignItems: "center" }}>
+          <span style={{ marginRight: "auto" }}>
+            providers (OpenAI-compatible)</span>
+          <button onClick={async () => {
+            const r = await api<any>(
+              "/api/providers/discover", {
+              method: "POST", body: "{}",
+            });
+            setMsg(`discovery: ` + (r.discovered ?? [])
+              .map((d: any) => `${d.provider} (${d.models} models, ${d.live_catalog ? "live catalog" : "config"})`)
+              .join(", ") + (r.default_binding ?
+                ` | default -> ${r.default_binding.provider}/${r.default_binding.model_id}` : ""));
+            await load();
+            onProvidersChanged();
+          }} style={{
+            fontSize: 10, padding: "3px 10px", cursor: "pointer",
+            background: t.accent, color: "#08120b", border: "none",
+            borderRadius: 6, fontWeight: 600,
+          }}>auto-discover</button>
+        </div>
         {providers.map((p) => (
           <div key={p.name} style={{
             display: "flex", gap: 8, fontSize: 12,
             alignItems: "center", marginBottom: 4,
           }}>
-            <b>{p.name}</b>
+            <b>{p.label ?? p.name}</b>
             <span style={{ color: t.dim }}>{p.base_url}</span>
             <span style={{ color: p.has_key ? t.accent : t.bad }}>
-              {p.has_key ? "key stored" : "no key"}</span>
+              {p.has_key ? "key in vault" : "no key"}</span>
             <span style={{ color: t.dim }}>{p.models.length} models</span>
             <button style={{
-              marginLeft: "auto", fontSize: 10, padding: "2px 8px",
-              background: t.input, color: p.disabled ? t.bad : t.accent,
+              fontSize: 10, padding: "2px 8px",
+              background: t.input,
+              color: p.disabled ? t.bad : t.accent,
               border: `1px solid ${t.border}`, borderRadius: 6,
             }} onClick={async () => {
               await api("/api/providers/test", {
@@ -449,59 +470,145 @@ function ModelPicker({ t, value, onChange, openSettings }: {
   openSettings: () => void;
 }) {
   const [providers, setProviders] = useState<ProviderRec[]>([]);
+  const [info, setInfo] = useState<Record<string, any>>({});
   const [open, setOpen] = useState(false);
-  useEffect(() => {
-    api<any>("/api/models/list").then((m) =>
-      setProviders(m.providers));
-  }, [open]);
+  const [filter, setFilter] = useState("");
+
+  const load = async () => {
+    const m = await api<any>("/api/models/list");
+    setProviders(m.providers);
+    const map: Record<string, any> = {};
+    m.providers.forEach((p: any) => {
+      map[p.name] = p.model_info ?? {};
+    });
+    setInfo(map);
+  };
+  useEffect(() => { load(); }, [open]);
+
+  const display = (p: string, m: string) =>
+    info[p]?.[m]?.name && info[p][m].name !== m ?
+      info[p][m].name : null;
+
   const label = value ?
-    `${value.provider}/${value.model_id}` : "LOCAL";
+    (display(value.provider, value.model_id) ??
+     `${value.provider}/${value.model_id}`) : "LOCAL";
+  const total = providers.reduce(
+    (a, p) => a + p.models.length, 0);
+
   return (
     <div style={{ position: "relative" }}>
-      <button onClick={() => setOpen(!open)} style={{
-        background: t.input, color: value ? t.accent : t.dim,
-        border: `1px solid ${t.border}`, borderRadius: 14,
-        padding: "3px 12px", fontSize: 11, cursor: "pointer",
-        fontWeight: 600, whiteSpace: "nowrap",
-      }}>◈ {label} ▾</button>
+      <button onClick={() => { setOpen(!open); setFilter(""); }}
+        style={{
+          background: t.input,
+          color: value ? t.accent : t.dim,
+          border: `1px solid ${t.border}`,
+          borderRadius: 14, padding: "3px 12px",
+          fontSize: 11, cursor: "pointer",
+          fontWeight: 600, whiteSpace: "nowrap",
+          maxWidth: 260, overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}>◈ {label} ▾</button>
       {open ? (
         <div style={{
           position: "absolute", bottom: "110%", left: 0,
-          background: t.panel, border: `1px solid ${t.border}`,
-          borderRadius: 8, minWidth: 240, zIndex: 40,
+          background: t.panel,
+          border: `1px solid ${t.border}`,
+          borderRadius: 8, width: 320, zIndex: 40,
           boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
-          maxHeight: 300, overflow: "auto",
         }}>
-          <div onClick={() => { onChange(null); setOpen(false); }}
-            style={{ padding: "7px 12px", fontSize: 12, cursor: "pointer",
-                     color: value === null ? t.accent : t.text }}>
-            LOCAL (deterministic - real tools, no model)
-          </div>
-          {providers.map((p) => (
-            <div key={p.name}>
-              <div style={{ padding: "5px 12px 2px", fontSize: 10,
-                            color: t.dim, textTransform: "uppercase",
-                            letterSpacing: 1 }}>{p.name}</div>
-              {p.models.map((m) => (
-                <div key={m} onClick={() => {
-                  onChange({ provider: p.name, model_id: m });
-                  setOpen(false);
-                }} style={{
-                  padding: "6px 16px", fontSize: 12, cursor: "pointer",
-                  color: value?.model_id === m &&
-                    value?.provider === p.name ? t.accent : t.text,
-                }}>{m}</div>
-              ))}
-              {!p.has_key ? (
-                <div style={{ padding: "2px 16px 6px", fontSize: 10,
-                              color: t.bad }}>no API key stored</div>
-              ) : null}
+          {total > 20 ? (
+            <input value={filter} autoFocus
+              placeholder={`filter ${total} models ...`}
+              onChange={(e) => setFilter(e.target.value)}
+              style={{
+                width: "100%", boxSizing: "border-box",
+                background: t.input, color: t.text,
+                border: "none", borderBottom:
+                  `1px solid ${t.border}`,
+                padding: "8px 12px", fontSize: 12,
+                borderRadius: "8px 8px 0 0",
+                outline: "none",
+              }} />
+          ) : null}
+          <div style={{
+            maxHeight: 280, overflowY: "auto",
+            borderRadius: "0 0 8px 8px",
+          }}>
+            <div onClick={() => {
+              onChange(null); setOpen(false);
+            }} style={{
+              padding: "7px 12px", fontSize: 12,
+              cursor: "pointer",
+              color: value === null ? t.accent : t.text,
+            }}>
+              LOCAL (deterministic - real tools, no model)
             </div>
-          ))}
-          <div onClick={() => { openSettings(); setOpen(false); }}
-            style={{ padding: "7px 12px", fontSize: 12, cursor: "pointer",
-                     borderTop: `1px solid ${t.border}`, color: t.dim }}>
-            Manage providers & models...
+            {providers.map((p) => {
+              const f = filter.toLowerCase();
+              const models = f ?
+                p.models.filter((m) =>
+                  m.toLowerCase().includes(f) ||
+                  (display(p.name, m) ?? "")
+                    .toLowerCase().includes(f))
+                : p.models;
+              if (filter && models.length === 0)
+                return null;
+              return (
+                <div key={p.name}>
+                  <div style={{
+                    padding: "5px 12px 2px", fontSize: 10,
+                    color: t.dim, textTransform: "uppercase",
+                    letterSpacing: 1,
+                    display: "flex", gap: 6,
+                  }}>
+                    <span>{p.name}</span>
+                    <span style={{ marginLeft: "auto" }}>
+                      {p.models.length}</span>
+                  </div>
+                  {models.slice(0, 60).map((m) => (
+                    <div key={m} onClick={() => {
+                      onChange({
+                        provider: p.name, model_id: m });
+                      setOpen(false);
+                    }} style={{
+                      padding: "5px 16px", fontSize: 12,
+                      cursor: "pointer",
+                      color: value?.model_id === m &&
+                        value?.provider === p.name ?
+                        t.accent : t.text,
+                    }}>
+                      {display(p.name, m) ?? m}
+                      {display(p.name, m) ? (
+                        <span style={{
+                          color: t.dim, fontSize: 10,
+                          marginLeft: 6,
+                        }}>{m}</span>) : null}
+                    </div>
+                  ))}
+                  {models.length > 60 ? (
+                    <div style={{
+                      padding: "4px 16px 6px", fontSize: 10,
+                      color: t.dim,
+                    }}>+{models.length - 60} more -
+                      use the filter</div>
+                  ) : null}
+                  {!p.has_key ? (
+                    <div style={{
+                      padding: "2px 16px 6px", fontSize: 10,
+                      color: t.bad,
+                    }}>no API key stored</div>
+                  ) : null}
+                </div>
+              );
+            })}
+            <div onClick={() => {
+              openSettings(); setOpen(false);
+            }} style={{
+              padding: "7px 12px", fontSize: 12,
+              cursor: "pointer",
+              borderTop: `1px solid ${t.border}`,
+              color: t.dim,
+            }}>Manage providers & models...</div>
           </div>
         </div>
       ) : null}
