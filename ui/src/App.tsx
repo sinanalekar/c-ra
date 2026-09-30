@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
 
-/* CYR@ - local desktop agent harness.
-   Every panel talks to the real backend (127.0.0.1:8765).
-   Unavailable capabilities display unavailable. */
+/* CYR@ - Codex-style local agent app.
+   Chat-first: composer with model picker, streaming activity
+   cards, provider management like OpenCode. Every control
+   hits the real backend. */
 
 const API = "http://127.0.0.1:8765";
 
@@ -11,876 +12,875 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json" },
     ...init,
   });
-  if (!r.ok) throw new Error(`${r.status}: ${(await r.text()).slice(0, 200)}`);
+  if (!r.ok) throw new Error(`${r.status}: ${(await r.text()).slice(0, 300)}`);
   return r.json() as Promise<T>;
 }
 
 type Theme = "dark" | "light";
-
 const themes = {
   dark: {
-    bg: "#0e1218", panel: "#161b24", border: "#2a3140",
-    text: "#d8dee9", dim: "#7f8ea3", accent: "#6fd08c",
-    warn: "#d8b64a", bad: "#e06c6c", input: "#11151d",
+    bg: "#0b0e13", panel: "#11151d", side: "#0d1117",
+    border: "#232b38", text: "#dce3ee", dim: "#76839a",
+    accent: "#5fd08a", accentDim: "#2b4c3a",
+    warn: "#d8b64a", bad: "#e06c6c", input: "#171c26",
+    user: "#1c2a3a", assistant: "#131926",
   },
   light: {
-    bg: "#f2f4f8", panel: "#ffffff", border: "#d5dae3",
-    text: "#1c2330", dim: "#5d6b80", accent: "#157f42",
-    warn: "#9a6b00", bad: "#b3261e", input: "#eef1f6",
+    bg: "#eef1f6", panel: "#ffffff", side: "#e4e9f0",
+    border: "#ccd4e0", text: "#1a2230", dim: "#5d6b80",
+    accent: "#0f7a3d", accentDim: "#d3edda",
+    warn: "#8a6200", bad: "#b3261e", input: "#f2f5fa",
+    user: "#d9e6f5", assistant: "#f7f9fc",
   },
 };
+type ThemeT = typeof themes.dark;
 
-const box = (t: typeof themes.dark): React.CSSProperties => ({
-  background: t.panel, border: `1px solid ${t.border}`,
-  borderRadius: 8, padding: 12,
-});
+type TaskRec = {
+  task_id: string; objective: string; state: string;
+  model?: { provider: string; model_id: string } | null;
+};
+type Activity = {
+  type: string; [k: string]: unknown;
+  command?: string; exit_code?: number | null; output?: string;
+  branch?: string; changes?: { path: string; index: string; worktree: string }[];
+  title?: string; text_head?: string; url?: string;
+  disposition?: string; target?: string;
+  capability?: string; reason?: string;
+  files?: number; dirs?: number;
+};
+type Msg = {
+  role: "user" | "assistant"; content: string; ts?: string;
+  mode?: string; model?: string | null;
+  activity?: Activity[]; results?: unknown[];
+};
+type ModelPick = { provider: string; model_id: string } | null;
+type ProviderRec = {
+  name: string; base_url: string; disabled: boolean;
+  has_key: boolean; models: string[];
+};
 
-const btn = (t: typeof themes.dark): React.CSSProperties => ({
-  background: t.input, color: t.text,
-  border: `1px solid ${t.border}`, borderRadius: 6,
-  padding: "4px 10px", cursor: "pointer", fontSize: 12,
-});
+/* ---------------------------------------------- mini-markdown */
 
-const input = (t: typeof themes.dark): React.CSSProperties => ({
-  background: t.input, color: t.text,
-  border: `1px solid ${t.border}`, borderRadius: 6,
-  padding: "4px 8px", fontSize: 12, width: "100%",
-  boxSizing: "border-box" as const,
-});
-
-const label = (t: typeof themes.dark): React.CSSProperties => ({
-  color: t.dim, fontSize: 10, textTransform: "uppercase",
-  letterSpacing: 1, margin: "8px 0 4px",
-});
-
-type JournalEntry = { ts: string; action: string; [k: string]: unknown };
-type TaskRec = { task_id: string; objective: string; state: string; events?: unknown[] };
-type AgentRun = { run_id: string; agent: string; state: string; steps: number; task_id?: string };
-type TermRec = { session_id: string; command: string; state: string; stdout?: string; stderr?: string; exit_code?: number | null };
-type ArtifactRec = { artifact_id: string; type: string; sha256: string; created_utc: string };
-
-function dispositionColor(t: typeof themes.dark, s: string): string {
-  if (["SUPPORTED", "VALIDATED", "REPRODUCED", "completed", "DONE",
-       "running", "ok", "true"].includes(s)) return t.accent;
-  if (["BLOCKED", "REFUTED", "FAILED", "cancelled", "STOPPED",
-       "paused"].includes(s)) return t.bad;
-  return t.warn;
-}
-
-/* ------------------------------------------------ panels */
-
-function TasksPanel({ t, refresh, say }: { t: typeof themes.dark; refresh: () => void; say: (m: string) => void }) {
-  const [tasks, setTasks] = useState<TaskRec[]>([]);
-  const [objective, setObjective] = useState("");
-  const [agentKind, setAgentKind] = useState("coordinator");
-  const [agentTask, setAgentTask] = useState("{}");
-  const [selected, setSelected] = useState<TaskRec | null>(null);
-
-  const load = async () => {
-    setTasks(await api<TaskRec[]>("/api/tasks"));
-    if (selected) {
-      const fresh = await api<TaskRec>(`/api/tasks/${selected.task_id}`);
-      setSelected(fresh);
-    }
-  };
-  useEffect(() => { load(); }, []); // eslint-disable-line
-
-  const control = async (id: string, op: string) => {
-    say(`task ${id}: ${op}`);
-    await api(`/api/tasks/${id}/${op}`, { method: "POST", body: "{}" });
-    load(); refresh();
-  };
-
-  const create = async () => {
-    if (!objective.trim()) return;
-    say("creating task ...");
-    const rec = await api<TaskRec>("/api/tasks", {
-      method: "POST",
-      body: JSON.stringify({ objective }),
-    });
-    say(`task ${rec.task_id} created`);
-    setObjective(""); load(); refresh();
-  };
-
-  const runAgentOnTask = async (taskId: string) => {
-    let task: Record<string, unknown>;
-    try { task = JSON.parse(agentTask || "{}"); }
-    catch { say("agent task JSON invalid"); return; }
-    say(`${agentKind} -> ${taskId}`);
-    try {
-      const out = await api<{ run_id: string; state: string }>(
-        `/api/tasks/${taskId}/agents`, {
-          method: "POST",
-          body: JSON.stringify({ kind: agentKind, task }),
-        });
-      say(`run ${out.run_id}: ${out.state}`);
-    } catch (e) { say(`agent error: ${String(e)}`); }
-    load(); refresh();
-  };
-
-  return (
-    <div>
-      <div style={{ ...box(t), display: "flex", gap: 8 }}>
-        <input style={input(t)} placeholder="new task objective ..."
-          value={objective}
-          onChange={(e) => setObjective(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && create()} />
-        <button style={btn(t)} onClick={create}>create</button>
-      </div>
-      {tasks.length === 0 ? <div style={{ ...label(t), textAlign: "center" }}>no tasks yet</div> : null}
-      {tasks.slice(-12).reverse().map((task) => (
-        <div key={task.task_id} style={{ ...box(t), marginTop: 8 }}>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <b style={{ fontSize: 12 }}>{task.task_id}</b>
-            <span style={{ color: dispositionColor(t, task.state), fontSize: 12 }}>{task.state}</span>
-            <span style={{ color: t.dim, fontSize: 12, flex: 1 }}>{task.objective}</span>
-            <button style={btn(t)} onClick={() => setSelected(task)}>open</button>
-            <button style={btn(t)} onClick={() => control(task.task_id, "pause")}>pause</button>
-            <button style={btn(t)} onClick={() => control(task.task_id, "resume")}>resume</button>
-            <button style={btn(t)} onClick={() => control(task.task_id, "stop")}>stop</button>
-          </div>
-          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-            <select style={{ ...btn(t), flex: 1 }} value={agentKind}
-              onChange={(e) => setAgentKind(e.target.value)}>
-              {["coordinator", "planner", "researcher", "coding_agent",
-                "terminal_agent", "browser_agent", "security_researcher",
-                "hypothesis_generator", "experiment_designer",
-                "hypothesis_challenger", "evidence_reviewer",
-                "reproduction_agent", "report_writer", "recovery_agent",
-                "artifact_analyst", "firmware_analyst",
-                "network_researcher", "fuzzing_researcher",
-                "method_researcher"].map((k) => (
-                <option key={k} value={k}>{k}</option>))}
-            </select>
-            <input style={{ ...input(t), flex: 2 }} value={agentTask}
-              placeholder='agent task JSON, e.g. {"shell":"python_code","command":"print(1)"}'
-              onChange={(e) => setAgentTask(e.target.value)} />
-            <button style={btn(t)} onClick={() => runAgentOnTask(task.task_id)}>run agent</button>
-          </div>
-        </div>
-      ))}
-      {selected ? (
-        <div style={{ ...box(t), marginTop: 8 }}>
-          <div style={{ ...label(t) }}>
-            {selected.task_id} events (newest last)
-          </div>
-          <div style={{ fontSize: 11, maxHeight: 220, overflow: "auto" }}>
-            {(selected.events ?? []).slice(-40).map((ev: any, i: number) => (
-              <div key={i}>{ev.ts} - {ev.kind} - {String(ev.detail).slice(0, 100)}</div>
-            ))}
-          </div>
-          <button style={{ ...btn(t), marginTop: 8 }}
-            onClick={async () => {
-              const rec = await api(`/api/tasks/${selected.task_id}/checkpoints`);
-              say(`checkpoints: ${JSON.stringify(rec).slice(0, 300)}`);
-            }}>checkpoints</button>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function ActivityPanel({ t, entries }: { t: typeof themes.dark; entries: JournalEntry[] }) {
-  return (
-    <div style={box(t)}>
-      <div style={label(t)}>live activity (journal, newest first)</div>
-      <div style={{ fontSize: 11, maxHeight: 500, overflow: "auto" }}>
-        {entries.map((e, i) => (
-          <div key={i} style={{ display: "flex", gap: 8 }}>
-            <span style={{ color: t.dim }}>{e.ts.slice(11, 19)}</span>
-            <span>{e.action}</span>
-            {"capability" in e ? <span style={{ color: t.dim }}>{String(e.capability)}</span> : null}
-            {"session_id" in e ? <span style={{ color: t.dim }}>{String(e.session_id)}</span> : null}
-            {"run_id" in e ? <span style={{ color: t.dim }}>{String(e.run_id)}</span> : null}
-            {"state" in e ? <span style={{ color: dispositionColor(t, String(e.state)) }}>{String(e.state)}</span> : null}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function WorkspacePanel({ t, say }: { t: typeof themes.dark; say: (m: string) => void }) {
-  const [tree, setTree] = useState<any[]>([]);
-  const [path, setPath] = useState("");
-  const [content, setContent] = useState("");
-
-  const loadTree = async (p = "") => {
-    await api("/api/workspace/write", {
-      method: "POST", body: JSON.stringify({ path: ".keep", content: "" }),
-    }).catch(() => { }); // first grant may be needed
-    const rows = await api<any[]>("/api/workspace/tree", {
-      method: "POST", body: JSON.stringify({ path: p }),
-    });
-    setTree(rows);
-  };
-
-  useEffect(() => { loadTree(); }, []); // eslint-disable-line
-
-  const grantAndLoad = async () => {
-    say("requesting workspace authorization (session) ...");
-    await api("/api/permissions/grant", {
-      method: "POST",
-      body: JSON.stringify({ capability: "filesystem.read", mode: "allow_session" }),
-    });
-    await api("/api/permissions/grant", {
-      method: "POST",
-      body: JSON.stringify({ capability: "filesystem.write", mode: "allow_session" }),
-    });
-    say("workspace authorized for this session");
-    loadTree();
-  };
-
-  return (
-    <div>
-      <div style={{ ...box(t) }}>
-        <button style={btn(t)} onClick={grantAndLoad}>authorize workspace (session)</button>
-        <div style={{ ...label(t) }}>workspace files</div>
-        <div style={{ fontSize: 11, maxHeight: 260, overflow: "auto" }}>
-          {tree.map((f: any, i: number) => (
-            <div key={i} style={{ display: "flex", gap: 8 }}>
-              <span>{f.dir ? "[d]" : "   "}</span>
-              <span style={{ cursor: "pointer" }}
-                onClick={() => !f.dir && setPath(f.path)}>{f.path}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-      <div style={{ ...box(t), marginTop: 8 }}>
-        <div style={label(t)}>read / write</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input style={input(t)} value={path} placeholder="workspace-relative path"
-            onChange={(e) => setPath(e.target.value)} />
-          <button style={btn(t)} onClick={async () => {
-            try {
-              const rec = await api<any>("/api/workspace/read", {
-                method: "POST", body: JSON.stringify({ path }),
-              });
-              setContent(rec.content ?? JSON.stringify(rec));
-            } catch (e) { say(String(e)); }
-          }}>read</button>
-          <button style={btn(t)} onClick={async () => {
-            try {
-              const rec = await api<any>("/api/workspace/write", {
-                method: "POST", body: JSON.stringify({ path, content }),
-              });
-              say(`written ${path} sha=${rec.sha256}`);
-            } catch (e) { say(String(e)); }
-          }}>write</button>
-        </div>
-        <textarea style={{ ...input(t), marginTop: 8, minHeight: 120, fontFamily: "monospace" }}
-          value={content} onChange={(e) => setContent(e.target.value)} />
-      </div>
-    </div>
-  );
-}
-
-function TerminalPanel({ t, say }: { t: typeof themes.dark; say: (m: string) => void }) {
-  const [shell, setShell] = useState("powershell");
-  const [command, setCommand] = useState("");
-  const [workdir, setWorkdir] = useState(".");
-  const [history, setHistory] = useState<string[]>([]);
-  const [active, setActive] = useState<TermRec | null>(null);
-  const [out, setOut] = useState("");
-  const [sessions, setSessions] = useState<TermRec[]>([]);
-  const pollRef = useRef<number | null>(null);
-
-  const refresh = async () => {
-    setSessions(await api<TermRec[]>("/api/terminal"));
-  };
-  useEffect(() => { refresh(); return () => { if (pollRef.current) clearInterval(pollRef.current); }; }, []); // eslint-disable-line
-
-  const run = async (confirm = false) => {
-    if (!command.trim()) return;
-    setHistory((h) => [...h, `$ ${command}`]);
-    try {
-      const rec = await api<TermRec>("/api/terminal", {
-        method: "POST",
-        body: JSON.stringify({ shell, command, workdir, timeout: 120, confirm_dangerous: confirm }),
-      });
-      if ((rec as any).blocked) {
-        setHistory((h) => [...h, "BLOCKED: " + (rec as any).reason + " - confirm to execute"]);
-        setActive(rec as TermRec);
-        return;
-      }
-      setActive(rec);
-      poll(rec.session_id);
-    } catch (e) {
-      setHistory((h) => [...h, `error: ${String(e)}`]);
-      say(`terminal error: ${String(e).slice(0, 120)}`);
-    }
-  };
-
-  const poll = (sid: string) => {
-    if (pollRef.current) clearInterval(pollRef.current);
-    pollRef.current = window.setInterval(async () => {
-      try {
-        const rec = await api<TermRec>(`/api/terminal/${sid}`);
-        setActive(rec);
-        setOut((rec.stdout ?? "") + (rec.stderr ? `\n[stderr] ${rec.stderr}` : ""));
-        if (rec.state !== "running") {
-          if (pollRef.current) clearInterval(pollRef.current);
-          setHistory((h) => [...h, `exit ${rec.exit_code}`]);
-          refresh();
+function Md({ text, t }: { text: string; t: ThemeT }) {
+  const parts: React.ReactNode[] = [];
+  let key = 0;
+  const segments = text.split(/```/);
+  segments.forEach((seg, i) => {
+    if (i % 2 === 1) {
+      const nl = seg.indexOf("\n");
+      const code = nl >= 0 ? seg.slice(nl + 1) : seg;
+      parts.push(
+        <pre key={key++} style={{
+          background: t.input, border: `1px solid ${t.border}`,
+          borderRadius: 8, padding: 10, fontSize: 12,
+          overflow: "auto", whiteSpace: "pre-wrap",
+          margin: "6px 0",
+        }}>{code}</pre>);
+    } else {
+      // bold + inline code
+      const chunks = seg.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+      chunks.forEach((c) => {
+        if (!c) return;
+        if (c.startsWith("**") && c.endsWith("**")) {
+          parts.push(<strong key={key++}>{c.slice(2, -2)}</strong>);
+        } else if (c.startsWith("`") && c.endsWith("`") && c.length > 2) {
+          parts.push(<code key={key++} style={{
+            background: t.input, borderRadius: 4,
+            padding: "1px 5px", fontSize: 12,
+            fontFamily: "Consolas, monospace",
+          }}>{c.slice(1, -1)}</code>);
+        } else {
+          parts.push(<span key={key++}>{c}</span>);
         }
-      } catch { if (pollRef.current) clearInterval(pollRef.current); }
-    }, 500);
-  };
-
-  return (
-    <div>
-      <div style={{ ...box(t), display: "flex", gap: 8 }}>
-        <select style={btn(t)} value={shell} onChange={(e) => setShell(e.target.value)}>
-          {["powershell", "cmd", "python", "python_code", "git"].map((s) => (
-            <option key={s} value={s}>{s}</option>))}
-        </select>
-        <input style={{ ...input(t), flex: 2 }} value={workdir}
-          onChange={(e) => setWorkdir(e.target.value)} />
-        <input style={{ ...input(t), flex: 4 }} value={command}
-          placeholder="command (streamed live)"
-          onChange={(e) => setCommand(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && run()} />
-        <button style={btn(t)} onClick={() => run()}>run</button>
-        <button style={btn(t)} onClick={async () => {
-          if (active?.session_id) {
-            await api(`/api/terminal/${active.session_id}/stop`, { method: "POST", body: "{}" });
-            say(`stopped ${active.session_id}`);
-          }
-        }}>stop</button>
-        <button style={btn(t)} onClick={() => { setOut(""); setHistory([]); }}>clear</button>
-      </div>
-      <div style={{ ...box(t), marginTop: 8 }}>
-        <div style={label(t)}>output (live)</div>
-        <pre style={{ fontSize: 11, margin: 0, maxHeight: 240, overflow: "auto",
-                      whiteSpace: "pre-wrap", color: t.text }}>{out}</pre>
-      </div>
-      <div style={{ ...box(t), marginTop: 8 }}>
-        <div style={label(t)}>history</div>
-        <div style={{ fontSize: 11, maxHeight: 160, overflow: "auto" }}>
-          {history.map((h: string, i: number) => <div key={i}>{h}</div>)}
-        </div>
-        <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
-          <span style={{ fontSize: 11, color: t.dim }}>
-            {active ? `${active.session_id}: ${active.state}${active.exit_code != null ? ` (exit ${active.exit_code})` : ""}` : "no active session"}
-          </span>
-          <button style={{ ...btn(t), marginLeft: "auto" }} onClick={() => navigator.clipboard?.writeText(out)}>copy output</button>
-        </div>
-      </div>
-    </div>
-  );
+      });
+    }
+  });
+  return <div style={{ lineHeight: 1.55 }}>{parts}</div>;
 }
 
-function GitPanel({ t, say }: { t: typeof themes.dark; say: (m: string) => void }) {
-  const [repo, setRepo] = useState("");
-  const [granted, setGranted] = useState(false);
-  const [status, setStatus] = useState<any>(null);
-  const [diff, setDiff] = useState("");
-  const [log, setLog] = useState<string[]>([]);
+/* ---------------------------------------------- activity cards */
 
-  const grant = async () => {
-    await api("/api/permissions/grant", {
-      method: "POST", body: JSON.stringify({ capability: "git.read", mode: "allow_session" }),
-    });
-    await api("/api/permissions/grant", {
-      method: "POST", body: JSON.stringify({ capability: "git.write", mode: "allow_session" }),
-    });
-    setGranted(true);
-    say("git.read + git.write authorized (session)");
-  };
-
-  const op = async (name: string, extra: Record<string, unknown> = {}) => {
-    try {
-      const rec = await api<any>(`/api/git/${name}`, {
-        method: "POST", body: JSON.stringify({ repo, ...extra }),
-      });
-      if (name === "status") setStatus(rec);
-      if (name === "diff") setDiff(rec.diff ?? "");
-      if (name === "log") setLog(rec.commits ?? []);
-      say(`git ${name} ok`);
-    } catch (e) { say(`git ${name}: ${String(e).slice(0, 140)}`); }
-  };
-
+function GrantButton({ t, cap, onGranted }: {
+  t: ThemeT; cap: string; onGranted: () => void }) {
+  const [done, setDone] = useState(false);
   return (
-    <div>
-      <div style={{ ...box(t), display: "flex", gap: 8 }}>
-        <input style={{ ...input(t), flex: 4 }} value={repo}
-          placeholder="local repository path"
-          onChange={(e) => setRepo(e.target.value)} />
-        <button style={btn(t)} onClick={grant}>authorize git</button>
-        <button style={btn(t)} onClick={() => op("discover")}>discover</button>
-        <button style={btn(t)} onClick={() => op("status")}>status</button>
-        <button style={btn(t)} onClick={() => op("diff")}>diff</button>
-        <button style={btn(t)} onClick={() => op("log")}>log</button>
-      </div>
-      {status ? (
-        <div style={{ ...box(t), marginTop: 8 }}>
-          <div style={label(t)}>status</div>
-          <div style={{ fontSize: 12, color: dispositionColor(t, status.branch ? "running" : "warn") }}>
-            branch: {status.branch ?? "?"}
-          </div>
-          {(status.changes ?? []).map((c: any, i: number) => (
-            <div key={i} style={{ fontSize: 11 }}>
-              {c.index}{c.worktree} {c.path}</div>
-          ))}
-        </div>
-      ) : null}
-      <div style={{ ...box(t), marginTop: 8 }}>
-        <div style={label(t)}>diff</div>
-        <pre style={{ fontSize: 11, margin: 0, maxHeight: 200, overflow: "auto",
-                      whiteSpace: "pre-wrap" }}>{diff || "(run diff)"}</pre>
-      </div>
-      <div style={{ ...box(t), marginTop: 8 }}>
-        <div style={label(t)}>log</div>
-        {log.map((c: string, i: number) => <div key={i} style={{ fontSize: 11 }}>{c}</div>)}
-      </div>
-    </div>
-  );
-}
-
-function BrowserPanel({ t, say }: { t: typeof themes.dark; say: (m: string) => void }) {
-  const [sid, setSid] = useState("");
-  const [url, setUrl] = useState("");
-  const [title, setTitle] = useState("");
-  const [text, setText] = useState("");
-  const [status, setStatus] = useState<any>(null);
-  const [sel, setSel] = useState("");
-
-  const open = async () => {
-    await api("/api/permissions/grant", {
-      method: "POST", body: JSON.stringify({ capability: "browser.read", mode: "allow_session" }),
-    });
-    await api("/api/permissions/grant", {
-      method: "POST", body: JSON.stringify({ capability: "browser.navigate", mode: "allow_session" }),
-    });
-    const sess = await api<{ session_id: string }>("/api/browser/sessions", {
-      method: "POST", body: "{}",
-    });
-    setSid(sess.session_id);
-    const st = await api<any>("/api/browser/status");
-    setStatus(st);
-    say(`browser session ${sess.session_id} (engine: ${st.engine})`);
-  };
-
-  const navigate = async () => {
-    if (!sid || !url) return;
-    try {
-      const rec = await api<any>(`/api/browser/sessions/${sid}/navigate`, {
-        method: "POST", body: JSON.stringify({ url }),
-      });
-      setTitle(rec.title ?? "");
-      say(`navigated: ${rec.title} (${rec.status})`);
-    } catch (e) { say(`navigate: ${String(e).slice(0, 140)}`); }
-  };
-
-  const extract = async () => {
-    if (!sid) return;
-    try {
-      const rec = await api<any>(`/api/browser/sessions/${sid}/extract`, {
-        method: "POST", body: "{}",
-      });
-      setText(rec.text ?? "");
-      say(`extracted ${rec.text?.length ?? 0} chars, ${rec.links?.length ?? 0} links`);
-    } catch (e) { say(`extract: ${String(e).slice(0, 140)}`); }
-  };
-
-  return (
-    <div>
-      <div style={{ ...box(t), display: "flex", gap: 8 }}>
-        <button style={btn(t)} onClick={open}>open session</button>
-        <input style={{ ...input(t), flex: 4 }} value={url} placeholder="https:// ..."
-          onChange={(e) => setUrl(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && navigate()} />
-        <button style={btn(t)} onClick={navigate}>navigate</button>
-        <button style={btn(t)} onClick={extract}>extract</button>
-        <input style={{ ...input(t), width: 140 }} value={sel} placeholder="#selector"
-          onChange={(e) => setSel(e.target.value)} />
-        <button style={btn(t)} onClick={async () => {
-          if (!sid || !sel) return;
-          try {
-            const rec = await api<any>(`/api/browser/sessions/${sid}/actions`, {
-              method: "POST",
-              body: JSON.stringify({ action: "click", selector: sel, confirm: true }),
-            });
-            say(`click: ${JSON.stringify(rec).slice(0, 120)}`);
-          } catch (e) { say(`click: ${String(e).slice(0, 140)}`); }
-        }}>click</button>
-      </div>
-      <div style={{ ...box(t), marginTop: 8, fontSize: 11 }}>
-        {status ? (
-          <div style={{ color: t.dim }}>
-            engine: {status.engine} | interaction: {String(status.interaction)} |
-            screenshots: {String(status.screenshots)} - {status.note}
-          </div>
-        ) : "open a session to see honest capability status"}
-      </div>
-      <div style={{ ...box(t), marginTop: 8 }}>
-        <div style={label(t)}>{title || "page text"}</div>
-        <div style={{ fontSize: 11, maxHeight: 260, overflow: "auto", whiteSpace: "pre-wrap" }}>
-          {text.slice(0, 5000) || "(navigate + extract)"}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AgentsPanel({ t, say }: { t: typeof themes.dark; say: (m: string) => void }) {
-  const [specs, setSpecs] = useState<any[]>([]);
-  const [runs, setRuns] = useState<AgentRun[]>([]);
-  const [kind, setKind] = useState("coordinator");
-  const [task, setTask] = useState("{}");
-
-  const load = async () => {
-    setSpecs(await api<any[]>("/api/agents/specs"));
-    setRuns(await api<AgentRun[]>("/api/agents"));
-  };
-  useEffect(() => { load(); }, []); // eslint-disable-line
-
-  const control = async (runId: string, op: string) => {
-    try {
-      const rec = await api(`/api/agents/${runId}/${op}`, {
+    <button style={{
+      fontSize: 11, padding: "4px 10px", cursor: "pointer",
+      background: done ? t.accentDim : t.accent,
+      color: done ? t.accent : "#08120b", border: "none",
+      borderRadius: 6, fontWeight: 600,
+    }} onClick={async () => {
+      if (done) return;
+      await api("/api/permissions/grant", {
         method: "POST",
-        body: op === "redirect" ? JSON.stringify({ task: { objective: "redirected" } }) : "{}",
+        body: JSON.stringify({ capability: cap, mode: "allow_session" }),
       });
-      say(`run ${runId} ${op}: ${JSON.stringify(rec).slice(0, 120)}`);
-    } catch (e) { say(String(e)); }
-    load();
-  };
-
-  return (
-    <div>
-      <div style={{ ...box(t), display: "flex", gap: 8 }}>
-        <select style={{ ...btn(t), flex: 1 }} value={kind} onChange={(e) => setKind(e.target.value)}>
-          {specs.map((s: any) => <option key={s.kind} value={s.kind}>{s.kind}</option>)}
-        </select>
-        <input style={{ ...input(t), flex: 3 }} value={task}
-          onChange={(e) => setTask(e.target.value)}
-          placeholder="agent task JSON" />
-        <button style={btn(t)} onClick={async () => {
-          try {
-            const out = await api<any>("/api/agents/run", {
-              method: "POST",
-              body: JSON.stringify({ kind, task: JSON.parse(task || "{}") }),
-            });
-            say(`run ${out.run_id}: ${out.state}`);
-          } catch (e) { say(String(e)); }
-          load();
-        }}>run</button>
-      </div>
-      <div style={{ ...box(t), marginTop: 8 }}>
-        <div style={label(t)}>agent runs (pause/resume/stop affect real executions)</div>
-        {runs.slice(-15).reverse().map((r: AgentRun) => (
-          <div key={r.run_id} style={{ display: "flex", gap: 8, fontSize: 11, alignItems: "center" }}>
-            <span style={{ color: t.dim }}>{r.run_id}</span>
-            <span>{r.agent}</span>
-            <span style={{ color: dispositionColor(t, r.state) }}>{r.state}</span>
-            <span style={{ color: t.dim }}>{r.steps} steps</span>
-            <span style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
-              <button style={btn(t)} onClick={() => control(r.run_id, "pause")}>pause</button>
-              <button style={btn(t)} onClick={() => control(r.run_id, "resume")}>resume</button>
-              <button style={btn(t)} onClick={() => control(r.run_id, "stop")}>stop</button>
-              <button style={btn(t)} onClick={async () => {
-                const rec = await api(`/api/agents/${r.run_id}/checkpoints`);
-                say(`checkpoints ${r.run_id}: ${JSON.stringify(rec).slice(0, 200)}`);
-              }}>cp</button>
-            </span>
-          </div>
-        ))}
-      </div>
-      <div style={{ ...box(t), marginTop: 8 }}>
-        <div style={label(t)}>specialists</div>
-        {specs.map((s: any) => (
-          <div key={s.kind} style={{ fontSize: 11 }}>
-            <b>{s.kind}</b> <span style={{ color: t.dim }}>{s.purpose.slice(0, 90)}</span>
-          </div>
-        ))}
-      </div>
-    </div>
+      setDone(true);
+      onGranted();
+    }}>{done ? "granted for session" : `Grant ${cap}`}</button>
   );
 }
 
-function ResearchPanel({ t, say }: { t: typeof themes.dark; say: (m: string) => void }) {
-  const [targets, setTargets] = useState<any[]>([]);
-  const [route, setRoute] = useState<any>(null);
-  const [coverage, setCoverage] = useState<any>(null);
-
-  const load = async () => {
-    const tg = await api<any[]>("/api/targets/search", {
-      method: "POST", body: JSON.stringify({ query: "" }),
-    });
-    setTargets(tg.slice(0, 30));
-    setCoverage(await api<any>("/api/coverage"));
+function ActivityCard({ a, t, onGranted, say }: {
+  a: Activity; t: ThemeT; onGranted: () => void;
+  say: (m: string) => void;
+}) {
+  const card: React.CSSProperties = {
+    background: t.panel, border: `1px solid ${t.border}`,
+    borderRadius: 8, padding: 10, margin: "6px 0",
+    fontSize: 12,
   };
-  useEffect(() => { load(); }, []); // eslint-disable-line
-
-  return (
-    <div>
-      <div style={{ ...box(t), fontSize: 12 }}>
-        {coverage ? `targets: ${coverage.total_targets}, untested: ${coverage.untested_count} - ${coverage.note}` : ""}
-      </div>
-      <div style={{ ...box(t), marginTop: 8, maxHeight: 300, overflow: "auto" }}>
-        <div style={label(t)}>Apple target universe (route any target)</div>
-        {targets.map((t2: any) => (
-          <div key={t2.target_id} style={{ fontSize: 11, display: "flex", gap: 8 }}>
-            <span style={{ color: t.dim }}>{t2.parent_category}</span>
-            <span>{t2.product}</span>
-            <button style={{ ...btn(t), padding: "0 6px", marginLeft: "auto", fontSize: 10 }}
-              onClick={async () => {
-                const rec = await api<any>("/api/targets/route", {
-                  method: "POST",
-                  body: JSON.stringify({ target_id: t2.target_id }),
-                });
-                setRoute(rec);
-                say(`route ${t2.target_id}: ${rec.chosen.engine}/${rec.chosen.template}`);
-              }}>route</button>
-          </div>
-        ))}
-      </div>
-      {route ? (
-        <div style={{ ...box(t), marginTop: 8 }}>
-          <div style={label(t)}>routing decision ({route.target_id})</div>
-          <div style={{ fontSize: 12 }}>chosen: {route.chosen.engine}/{route.chosen.template}</div>
-          <div style={{ fontSize: 11, color: t.dim }}>
-            capabilities: {route.required_capabilities.join(", ")}
-          </div>
-          {route.ranked_experiments.map((e: any, i: number) => (
-            <div key={i} style={{ fontSize: 11 }}>
-              {i + 1}. {e.engine}/{e.template} score {e.score} (impact {e.impact},
-              auth-burden {e.authorization_burden}, risk {e.safety_risk})
-            </div>
-          ))}
+  const head: React.CSSProperties = {
+    color: t.dim, fontSize: 10, textTransform: "uppercase",
+    letterSpacing: 1, marginBottom: 4,
+  };
+  if (a.type === "terminal") {
+    return (
+      <div style={card}>
+        <div style={head}>terminal
+          {a.exit_code != null && (
+            <span style={{
+              marginLeft: 8, color: a.exit_code === 0 ? t.accent : t.bad,
+            }}>exit {a.exit_code}</span>)}
         </div>
-      ) : null}
-    </div>
-  );
+        <div style={{ fontFamily: "Consolas, monospace", fontSize: 11,
+                      color: t.text, whiteSpace: "pre-wrap",
+                      maxHeight: 240, overflow: "auto" }}>
+          {(a.output ?? "").trim() || "(no output)"}
+        </div>
+      </div>);
+  }
+  if (a.type === "git_status") {
+    const changes: any[] = (a.changes ?? []).slice(0, 10);
+    return (
+      <div style={card}>
+        <div style={head}>git status - branch {a.branch ?? "?"}</div>
+        {changes.length === 0 ?
+          <span style={{ color: t.dim }}>clean</span> :
+          changes.map((c, i) => (
+            <div key={i} style={{ fontFamily: "Consolas, monospace", fontSize: 11 }}>
+              <span style={{ color: c.index !== " " || c.worktree !== " " ? t.warn : t.dim }}>
+                {c.index}{c.worktree}
+              </span> {c.path}
+            </div>))}
+      </div>);
+  }
+  if (a.type === "browser") {
+    return (
+      <div style={card}>
+        <div style={head}>browser - {a.url}</div>
+        <div style={{ color: t.accent }}>{a.title}</div>
+        <div style={{ color: t.dim, fontSize: 11 }}>
+          {(a.text_head ?? "").slice(0, 220)}...</div>
+      </div>);
+  }
+  if (a.type === "research") {
+    return (
+      <div style={card}>
+        <div style={head}>research loop - {a.target}</div>
+        <span style={{ color: a.disposition === "SUPPORTED" ? t.accent : t.warn,
+                      fontWeight: 600 }}>{a.disposition}</span>
+        <span style={{ color: t.dim }}> (gates: negative controls + reproduction)</span>
+      </div>);
+  }
+  if (a.type === "workspace") {
+    return (
+      <div style={card}>
+        <div style={head}>workspace</div>
+        <span>{a.files} files, {a.dirs} directories</span>
+      </div>);
+  }
+  if (a.type === "permission_request") {
+    return (
+      <div style={{ ...card, borderColor: t.warn }}>
+        <div style={{ ...head, color: t.warn }}>authorization required</div>
+        <div>{a.capability} - {a.reason}</div>
+        <div style={{ marginTop: 8 }}>
+          <GrantButton t={t} cap={a.capability!} onGranted={() => {
+            say(`granted ${a.capability} - re-running your request`);
+            onGranted();
+          }} />
+        </div>
+      </div>);
+  }
+  if (a.type === "error") {
+    return (
+      <div style={{ ...card, borderColor: t.bad }}>
+        <div style={{ ...head, color: t.bad }}>error</div>
+        <div>{String(a.detail)}</div>
+      </div>);
+  }
+  if (a.type === "info") {
+    return (
+      <div style={card}>
+        <div style={head}>note</div>
+        <div>{String(a.detail)}</div>
+      </div>);
+  }
+  return null;
 }
 
-function ArtifactsPanel({ t, say }: { t: typeof themes.dark; say: (m: string) => void }) {
-  const [items, setItems] = useState<ArtifactRec[]>([]);
-  const [content, setContent] = useState("");
+/* ---------------------------------------------- settings modal */
 
-  const load = async () => setItems(await api<ArtifactRec[]>("/api/artifacts"));
-  useEffect(() => { load(); }, []); // eslint-disable-line
+const ROLES = ["coordinator", "planner", "reasoning", "coding",
+  "research", "browser", "terminal", "reviewer",
+  "independent_reviewer", "falsification_reviewer",
+  "report_writer", "security_researcher"];
 
-  return (
-    <div>
-      <div style={box(t)}>
-        <div style={label(t)}>artifacts (provenance + integrity)</div>
-        {items.slice(-25).reverse().map((a: ArtifactRec) => (
-          <div key={a.artifact_id} style={{ fontSize: 11, display: "flex", gap: 8 }}>
-            <span style={{ color: t.dim }}>{a.artifact_id}</span>
-            <span>{a.type}</span>
-            <span style={{ color: t.dim }}>{a.sha256.slice(0, 16)}</span>
-            <button style={{ ...btn(t), padding: "0 6px", marginLeft: "auto", fontSize: 10 }}
-              onClick={async () => {
-                const rec = await api<any>(`/api/artifacts/${a.artifact_id}`);
-                setContent(`integrity=${rec.integrity}\n${(rec.content ?? "").slice(0, 3000)}`);
-              }}>open</button>
-          </div>
-        ))}
-        {items.length === 0 ? <div style={{ fontSize: 11, color: t.dim }}>none yet</div> : null}
-      </div>
-      <div style={{ ...box(t), marginTop: 8 }}>
-        <div style={label(t)}>artifact content</div>
-        <pre style={{ fontSize: 11, margin: 0, maxHeight: 260, overflow: "auto",
-                      whiteSpace: "pre-wrap" }}>{content}</pre>
-      </div>
-      <div style={{ ...box(t), marginTop: 8 }}>
-        <button style={btn(t)} onClick={async () => {
-          const rec = await api<any>("/api/evidence/stats");
-          say(`evidence: ${JSON.stringify(rec)}`);
-        }}>evidence stats</button>
-      </div>
-    </div>
-  );
-}
+const SESSION_CAPS = ["filesystem.read", "filesystem.write",
+  "terminal.execute", "git.read", "git.write",
+  "browser.read", "browser.navigate", "research.execute",
+  "engine.cider", "engine.veritas", "engine.hydra",
+  "engine.seek", "engine.frontier"];
 
-function SettingsPanel({ t, say }: { t: typeof themes.dark; say: (m: string) => void }) {
-  const [providers, setProviders] = useState<any>(null);
-  const [models, setModels] = useState<any>(null);
+function SettingsModal({ t, close, onProvidersChanged }: {
+  t: ThemeT; close: () => void;
+  onProvidersChanged: () => void;
+}) {
+  const [providers, setProviders] = useState<ProviderRec[]>([]);
+  const [bindings, setBindings] = useState<Record<string, any>>({});
   const [caps, setCaps] = useState<any>(null);
   const [name, setName] = useState("");
   const [baseUrl, setBaseUrl] = useState("https://");
-  const [model, setModel] = useState("");
-  const [role, setRole] = useState("coordinator");
+  const [apiKey, setApiKey] = useState("");
+  const [models, setModels] = useState("");
+  const [msg, setMsg] = useState("");
 
   const load = async () => {
-    setProviders(await api<any>("/api/providers"));
-    setModels(await api<any>("/api/models"));
+    const ml = await api<any>("/api/models/list");
+    setProviders(ml.providers);
+    setBindings(ml.role_bindings);
     setCaps(await api<any>("/api/permissions"));
   };
   useEffect(() => { load(); }, []); // eslint-disable-line
 
+  const grantedSet = new Set(
+    (caps?.grants ?? []).map((g: any) => g.capability));
+
+  const add = async (testOnly = false) => {
+    try {
+      const spec: any = {
+        name, base_url: baseUrl, api_format: "openai",
+        model_ids: models.split(",").map((m) => m.trim())
+          .filter(Boolean),
+      };
+      if (testOnly) {
+        if (!providers.some((p) => p.name === name)) {
+          await api("/api/providers/with_key", {
+            method: "POST",
+            body: JSON.stringify({ spec, api_key: apiKey }),
+          });
+        }
+        const res = await api<any>("/api/providers/test", {
+          method: "POST",
+          body: JSON.stringify({ name }),
+        });
+        if (res.ok) {
+          setMsg(`connection OK - ${res.models.length} models visible`);
+          if (res.models.length && !models) {
+            setModels(res.models.slice(0, 12).join(", "));
+          }
+        } else setMsg(`connection failed: ${res.reason}`);
+      } else {
+        await api("/api/providers/with_key", {
+          method: "POST",
+          body: JSON.stringify({ spec, api_key: apiKey }),
+        });
+        setMsg(`provider ${name} added${apiKey ? " (key stored in OS credential vault)" : ""}`);
+        setName(""); setBaseUrl("https://"); setApiKey(""); setModels("");
+        await load();
+        onProvidersChanged();
+      }
+    } catch (e) { setMsg(String(e)); }
+  };
+
+  const field = (v: string, set: (s: string) => void,
+    ph: string, pw = false, flex = 1) => (
+    <input value={v} placeholder={ph}
+      type={pw ? "password" : "text"}
+      style={{ flex, background: t.input, color: t.text,
+        border: `1px solid ${t.border}`, borderRadius: 6,
+        padding: "6px 9px", fontSize: 12, minWidth: 0 }}
+      onChange={(e) => set(e.target.value)} />
+  );
+
   return (
-    <div>
-      <div style={{ ...box(t) }}>
-        <div style={label(t)}>provider (OpenAI-compatible, https only)</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input style={input(t)} placeholder="name" value={name}
-            onChange={(e) => setName(e.target.value)} />
-          <input style={{ ...input(t), flex: 2 }} placeholder="https://api ..." value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)} />
-          <button style={btn(t)} onClick={async () => {
-            try {
-              await api("/api/providers", {
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)",
+      display: "flex", alignItems: "center",
+      justifyContent: "center", zIndex: 50,
+    }} onClick={close}>
+      <div style={{
+        background: t.panel, border: `1px solid ${t.border}`,
+        borderRadius: 12, width: "min(720px, 92vw)",
+        maxHeight: "86vh", overflow: "auto", padding: 20,
+      }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 14 }}>
+          Settings</div>
+
+        {/* providers */}
+        <div style={{ fontSize: 11, textTransform: "uppercase",
+                      letterSpacing: 1, color: t.dim, margin: "4px 0 8px" }}>
+          providers (OpenAI-compatible)</div>
+        {providers.map((p) => (
+          <div key={p.name} style={{
+            display: "flex", gap: 8, fontSize: 12,
+            alignItems: "center", marginBottom: 4,
+          }}>
+            <b>{p.name}</b>
+            <span style={{ color: t.dim }}>{p.base_url}</span>
+            <span style={{ color: p.has_key ? t.accent : t.bad }}>
+              {p.has_key ? "key stored" : "no key"}</span>
+            <span style={{ color: t.dim }}>{p.models.length} models</span>
+            <button style={{
+              marginLeft: "auto", fontSize: 10, padding: "2px 8px",
+              background: t.input, color: p.disabled ? t.bad : t.accent,
+              border: `1px solid ${t.border}`, borderRadius: 6,
+            }} onClick={async () => {
+              await api("/api/providers/test", {
                 method: "POST",
-                body: JSON.stringify({ spec: { name, base_url: baseUrl, api_format: "openai" } }),
-              });
-              say(`provider ${name} configured (API key via OS credential store)`);
-              load();
-            } catch (e) { say(String(e)); }
-          }}>add</button>
+                body: JSON.stringify({ name: p.name }),
+              }).then((r: any) =>
+                setMsg(r.ok ? `${p.name}: OK (${r.models.length} models)`
+                  : `${p.name}: ${r.reason}`))
+                .catch((e) => setMsg(String(e)));
+            }}>test</button>
+          </div>
+        ))}
+        <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+          {field(name, setName, "provider name")}
+          {field(baseUrl, setBaseUrl, "https://api.provider.com/v1", false, 2)}
+          {field(apiKey, setApiKey, "API key (stored in OS vault, never logged)", true, 2)}
         </div>
-        <div style={{ ...label(t) }}>role binding</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <select style={btn(t)} value={role} onChange={(e) => setRole(e.target.value)}>
-            {["coordinator", "planner", "reasoning", "coding", "research",
-              "browser", "terminal", "reviewer", "independent_reviewer",
-              "falsification_reviewer", "report_writer",
-              "security_researcher"].map((r) => <option key={r}>{r}</option>)}
-          </select>
-          <input style={{ ...input(t), flex: 2 }} placeholder="model id" value={model}
-            onChange={(e) => setModel(e.target.value)} />
-          <button style={btn(t)} onClick={async () => {
-            try {
-              await api("/api/providers/roles", {
+        <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+          {field(models, setModels,
+            "model ids, comma separated (or use test to fetch)", false, 3)}
+          <button onClick={() => add(true)} style={{
+            background: t.input, color: t.text,
+            border: `1px solid ${t.border}`, borderRadius: 6,
+            padding: "5px 12px", fontSize: 12, cursor: "pointer",
+          }}>test / fetch models</button>
+          <button onClick={() => add(false)} style={{
+            background: t.accent, color: "#08120b",
+            border: "none", borderRadius: 6,
+            padding: "5px 12px", fontSize: 12,
+            fontWeight: 600, cursor: "pointer",
+          }}>add provider</button>
+        </div>
+        {msg ? <div style={{ fontSize: 11, color: t.dim, marginTop: 6 }}>{msg}</div> : null}
+
+        {/* role bindings */}
+        <div style={{ fontSize: 11, textTransform: "uppercase",
+                      letterSpacing: 1, color: t.dim, margin: "18px 0 8px" }}>
+          role bindings</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+          {ROLES.map((role) => {
+            const b = bindings[role] ?? {};
+            const providerList = providers.length ?
+              providers : [];
+            return (
+              <div key={role} style={{ display: "flex", gap: 6,
+                                        alignItems: "center", fontSize: 11 }}>
+                <span style={{ width: 122, color: t.dim }}>{role}</span>
+                <select value={b.provider ?? ""} style={{
+                  flex: 1, background: t.input, color: t.text,
+                  border: `1px solid ${t.border}`, borderRadius: 4,
+                  padding: "3px 4px", fontSize: 11 }}
+                  onChange={async (e) => {
+                    const provider = e.target.value;
+                    const model_id = provider ?
+                      (providers.find((p) => p.name === provider)
+                        ?.models[0] ?? "") : "";
+                    await api("/api/providers/roles", {
+                      method: "POST",
+                      body: JSON.stringify({ role, provider, model_id }),
+                    }).then(() => load())
+                      .catch((err) => setMsg(String(err)));
+                  }}>
+                  <option value="">LOCAL (deterministic)</option>
+                  {providerList.map((p) =>
+                    <option key={p.name} value={p.name}>{p.name}</option>)}
+                </select>
+                {b.provider ? <span style={{ color: t.dim, fontSize: 10 }}>
+                  {b.model_id}</span> : null}
+              </div>);
+          })}
+        </div>
+
+        {/* capabilities */}
+        <div style={{ fontSize: 11, textTransform: "uppercase",
+                      letterSpacing: 1, color: t.dim, margin: "18px 0 8px" }}>
+          session capabilities (deny-by-default)</div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {SESSION_CAPS.map((c) => (
+            <button key={c} onClick={async () => {
+              await api("/api/permissions/grant", {
                 method: "POST",
-                body: JSON.stringify({ role, provider: name, model_id: model }),
+                body: JSON.stringify({ capability: c, mode: "allow_session" }),
               });
-              say(`role ${role} -> ${name}/${model}`);
               load();
-            } catch (e) { say(String(e)); }
-          }}>bind</button>
+            }} style={{
+              fontSize: 10, padding: "3px 8px", cursor: "pointer",
+              background: grantedSet.has(c) ? t.accentDim : t.input,
+              color: grantedSet.has(c) ? t.accent : t.dim,
+              border: `1px solid ${t.border}`, borderRadius: 12,
+            }}>{c}{grantedSet.has(c) ? " ✓" : ""}</button>
+          ))}
         </div>
-      </div>
-      <div style={{ ...box(t), marginTop: 8, fontSize: 11 }}>
-        <div style={label(t)}>model routes</div>
-        {models ? Object.entries(models.roles).map(([r, v]: any) => (
-          <div key={r}>{r}: <span style={{ color: t.dim }}>
-            {v.mode === "LOCAL" ? v.note : `${v.provider}/${v.model_id}`}</span></div>
-        )) : null}
-      </div>
-      <div style={{ ...box(t), marginTop: 8, fontSize: 11, maxHeight: 260, overflow: "auto" }}>
-        <div style={label(t)}>capabilities (deny-by-default ledger)</div>
-        {caps ? (caps.grants ?? []).map((g: any, i: number) => (
-          <div key={i}>{g.capability} [{g.mode}] scope={g.scope}</div>
-        )) : null}
-        {(caps?.grants ?? []).length === 0 ?
-          <span style={{ color: t.dim }}>no grants yet</span> : null}
+
+        <div style={{ display: "flex", justifyContent: "flex-end",
+                      marginTop: 18 }}>
+          <button onClick={close} style={{
+            background: t.accent, color: "#08120b",
+            border: "none", borderRadius: 6, padding: "6px 16px",
+            fontSize: 12, fontWeight: 600, cursor: "pointer",
+          }}>done</button>
+        </div>
       </div>
     </div>
   );
 }
 
-function ReportsPanel({ t, say }: { t: typeof themes.dark; say: (m: string) => void }) {
-  const [expId, setExpId] = useState("");
-  const [report, setReport] = useState("");
+/* ---------------------------------------------- model picker */
+
+function ModelPicker({ t, value, onChange, openSettings }: {
+  t: ThemeT; value: ModelPick;
+  onChange: (m: ModelPick) => void;
+  openSettings: () => void;
+}) {
+  const [providers, setProviders] = useState<ProviderRec[]>([]);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    api<any>("/api/models/list").then((m) =>
+      setProviders(m.providers));
+  }, [open]);
+  const label = value ?
+    `${value.provider}/${value.model_id}` : "LOCAL";
   return (
-    <div>
-      <div style={{ ...box(t), display: "flex", gap: 8 }}>
-        <input style={{ ...input(t), flex: 2 }} value={expId} placeholder="experiment id (EX-...)"
-          onChange={(e) => setExpId(e.target.value)} />
-        <button style={btn(t)} onClick={async () => {
-          try {
-            const r = await fetch(`${API}/api/experiments/${expId}/report.md`);
-            setReport(r.ok ? await r.text() : `error ${r.status}`);
-            say("report generated");
-          } catch (e) { say(String(e)); }
-        }}>generate report</button>
-      </div>
-      <div style={{ ...box(t), marginTop: 8 }}>
-        <pre style={{ fontSize: 11, margin: 0, maxHeight: 420, overflow: "auto",
-                      whiteSpace: "pre-wrap" }}>{report || "(reports include the mandatory not-demonstrated list)"}</pre>
-      </div>
+    <div style={{ position: "relative" }}>
+      <button onClick={() => setOpen(!open)} style={{
+        background: t.input, color: value ? t.accent : t.dim,
+        border: `1px solid ${t.border}`, borderRadius: 14,
+        padding: "3px 12px", fontSize: 11, cursor: "pointer",
+        fontWeight: 600, whiteSpace: "nowrap",
+      }}>◈ {label} ▾</button>
+      {open ? (
+        <div style={{
+          position: "absolute", bottom: "110%", left: 0,
+          background: t.panel, border: `1px solid ${t.border}`,
+          borderRadius: 8, minWidth: 240, zIndex: 40,
+          boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+          maxHeight: 300, overflow: "auto",
+        }}>
+          <div onClick={() => { onChange(null); setOpen(false); }}
+            style={{ padding: "7px 12px", fontSize: 12, cursor: "pointer",
+                     color: value === null ? t.accent : t.text }}>
+            LOCAL (deterministic - real tools, no model)
+          </div>
+          {providers.map((p) => (
+            <div key={p.name}>
+              <div style={{ padding: "5px 12px 2px", fontSize: 10,
+                            color: t.dim, textTransform: "uppercase",
+                            letterSpacing: 1 }}>{p.name}</div>
+              {p.models.map((m) => (
+                <div key={m} onClick={() => {
+                  onChange({ provider: p.name, model_id: m });
+                  setOpen(false);
+                }} style={{
+                  padding: "6px 16px", fontSize: 12, cursor: "pointer",
+                  color: value?.model_id === m &&
+                    value?.provider === p.name ? t.accent : t.text,
+                }}>{m}</div>
+              ))}
+              {!p.has_key ? (
+                <div style={{ padding: "2px 16px 6px", fontSize: 10,
+                              color: t.bad }}>no API key stored</div>
+              ) : null}
+            </div>
+          ))}
+          <div onClick={() => { openSettings(); setOpen(false); }}
+            style={{ padding: "7px 12px", fontSize: 12, cursor: "pointer",
+                     borderTop: `1px solid ${t.border}`, color: t.dim }}>
+            Manage providers & models...
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
 
-/* ------------------------------------------------ app */
-
-const VIEWS = ["Tasks", "Activity", "Workspace", "Terminal", "Git",
-  "Browser", "Agents", "Research", "Artifacts", "Reports", "Settings"] as const;
-type View = typeof VIEWS[number];
+/* ---------------------------------------------- app */
 
 export default function App() {
   const [theme, setTheme] = useState<Theme>("dark");
-  const [view, setView] = useState<View>("Tasks");
-  const [journal, setJournal] = useState<JournalEntry[]>([]);
-  const [consoleLog, setConsoleLog] = useState<string[]>([]);
+  const t = themes[theme];
+  const [tasks, setTasks] = useState<TaskRec[]>([]);
+  const [activeTask, setActiveTask] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [draft, setDraft] = useState("");
+  const [model, setModel] = useState<ModelPick>(null);
+  const [taskModel, setTaskModel] = useState<ModelPick>(null);
+  const [busy, setBusy] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [status, setStatus] = useState<any>(null);
+  const [journalValid, setJournalValid] = useState(true);
+  const [showSettings, setShowSettings] = useState(false);
+  const [consoleMsg, setConsoleMsg] = useState<string[]>([]);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const lastUserText = useRef("");
 
-  const say = (m: string) => setConsoleLog((l) => [...l, m]);
+  const say = (m: string) => setConsoleMsg((l) => [...l.slice(-6), m]);
 
-  const refresh = async () => {
+  const loadTasks = async () => {
     try {
-      const st = await api<any>("/api/status");
-      setStatus(st);
+      const list = await api<TaskRec[]>("/api/tasks");
+      setTasks(list);
       setConnected(true);
-      const j = await api<JournalEntry[]>("/api/journal?limit=60");
-      setJournal(j.slice().reverse());
-    } catch {
-      setConnected(false);
-    }
+      const j = await api<any>("/api/journal/verify");
+      setJournalValid(j.valid);
+    } catch { setConnected(false); }
+  };
+
+  const loadMessages = async (taskId: string) => {
+    try {
+      const r = await api<{ messages: Msg[] }>(
+        `/api/chat/${taskId}/messages`);
+      setMessages(r.messages);
+    } catch { setMessages([]); }
   };
 
   useEffect(() => {
-    refresh();
-    const id = window.setInterval(refresh, 4000);
+    loadTasks();
+    const id = window.setInterval(loadTasks, 5000);
     return () => clearInterval(id);
   }, []);
 
-  const t = themes[theme];
+  useEffect(() => {
+    if (activeTask) {
+      loadMessages(activeTask);
+      api<any>(`/api/tasks/${activeTask}`).then((task) =>
+        setTaskModel(task.model ?? null));
+    } else setMessages([]);
+  }, [activeTask]);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({
+      top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages, busy]);
+
+  const newTask = async () => {
+    const objective = draft.trim() ||
+      "New conversation";
+    const rec = await api<TaskRec>("/api/tasks", {
+      method: "POST",
+      body: JSON.stringify({ objective }),
+    });
+    setActiveTask(rec.task_id);
+    setTasks((l) => [...l, rec]);
+    const text = draft.trim();
+    setDraft("");
+    if (text) send(text, rec.task_id);
+  };
+
+  const send = async (textArg?: string, taskIdArg?: string) => {
+    const text = (textArg ?? draft).trim();
+    const tid = taskIdArg ?? activeTask;
+    if (!text || !tid) return;
+    lastUserText.current = text;
+    if (!textArg) setDraft("");
+    setBusy(true);
+    setMessages((m) => [...m, { role: "user", content: text }]);
+    try {
+      const effective = taskModel ?? model;
+      const out = await api<{ assistant: Msg }>(`/api/chat`, {
+        method: "POST",
+        body: JSON.stringify({
+          task_id: tid, text,
+          model: effective,
+          set_task_model: !!effective,
+        }),
+      });
+      await loadMessages(tid);
+      if (effective) {
+        await api(`/api/tasks/${tid}/model`, {
+          method: "POST",
+          body: JSON.stringify({ model: effective }),
+        }).catch(() => { });
+      }
+      loadTasks();
+    } catch (e) {
+      setMessages((m) => [...m, {
+        role: "assistant",
+        content: `error: ${String(e)}`,
+        mode: "error",
+      }]);
+    }
+    setBusy(false);
+  };
+
+  const activeModel = taskModel ?? model;
 
   return (
-    <div style={{ background: t.bg, color: t.text, minHeight: "100vh",
-                  fontFamily: "Segoe UI, sans-serif" }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 12,
-                    padding: "14px 16px 6px" }}>
-        <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: 1 }}>CYR@</div>
-        <div style={{ fontSize: 12, color: t.dim }}>local desktop agent harness</div>
-        <div style={{ marginLeft: "auto", fontSize: 11, color: t.dim }}>
-          backend {connected ?
-            <span style={{ color: t.accent }}>loopback online</span> :
-            <span style={{ color: t.bad }}>offline</span>}
-          {status ? ` | journal ${status.journal.entries} entries ${status.journal.valid ? "VALID" : "TAMPERED"}` : ""}
+    <div style={{
+      display: "flex", height: "100vh",
+      background: t.bg, color: t.text,
+      fontFamily: "Inter, 'Segoe UI', sans-serif",
+    }}>
+      {/* ---------------- sidebar ---------------- */}
+      <div style={{
+        width: 240, background: t.side,
+        borderRight: `1px solid ${t.border}`,
+        display: "flex", flexDirection: "column",
+      }}>
+        <div style={{
+          padding: "16px 14px 10px", fontSize: 20,
+          fontWeight: 800, letterSpacing: 2,
+        }}>CYR@</div>
+        <div style={{ padding: "0 14px 12px" }}>
+          <button onClick={newTask} style={{
+            width: "100%", background: t.accent,
+            color: "#08120b", border: "none",
+            borderRadius: 8, padding: "9px 0",
+            fontSize: 13, fontWeight: 700, cursor: "pointer",
+          }}>+ New task</button>
         </div>
-        <button style={btn(t)} onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
-          {theme === "dark" ? "light" : "dark"}
-        </button>
+        <div style={{
+          flex: 1, overflowY: "auto", padding: "0 8px",
+        }}>
+          {tasks.slice(-40).reverse().map((task) => (
+            <div key={task.task_id} onClick={() =>
+              setActiveTask(task.task_id)} style={{
+              padding: "8px 10px", borderRadius: 7,
+              cursor: "pointer", marginBottom: 2, fontSize: 12,
+              background: activeTask === task.task_id ?
+                t.panel : "transparent",
+              border: activeTask === task.task_id ?
+                `1px solid ${t.border}` : "1px solid transparent",
+            }}>
+              <div style={{
+                overflow: "hidden", textOverflow: "ellipsis",
+                whiteSpace: "nowrap", fontWeight: 500,
+              }}>{task.objective}</div>
+              <div style={{ fontSize: 10, color: t.dim }}>
+                <span style={{
+                  color: task.state === "running" ? t.accent :
+                    task.state === "paused" ? t.warn :
+                    task.state === "cancelled" ? t.bad : t.dim,
+                }}>{task.state}</span>
+                {task.model ? ` - ${task.model.model_id}` : ""}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{
+          borderTop: `1px solid ${t.border}`,
+          padding: 10, display: "flex", gap: 8,
+        }}>
+          <button onClick={() => setShowSettings(true)}
+            style={{
+              flex: 1, background: t.input, color: t.text,
+              border: `1px solid ${t.border}`,
+              borderRadius: 8, padding: "7px 0", fontSize: 12,
+              cursor: "pointer",
+            }}>Settings</button>
+          <button onClick={() => setTheme(
+            theme === "dark" ? "light" : "dark")}
+            style={{
+              background: t.input, color: t.text,
+              border: `1px solid ${t.border}`,
+              borderRadius: 8, padding: "7px 10px",
+              fontSize: 12, cursor: "pointer",
+            }}>{theme === "dark" ? "☀" : "☾"}</button>
+        </div>
       </div>
-      <div style={{ display: "flex", padding: "0 16px 12px", gap: 6, flexWrap: "wrap" }}>
-        {VIEWS.map((v) => (
-          <button key={v} style={{
-            ...btn(t),
-            ...(view === v ? { borderColor: t.accent, color: t.accent } : {}),
-          }} onClick={() => setView(v)}>{v}</button>
-        ))}
+
+      {/* ---------------- main ---------------- */}
+      <div style={{
+        flex: 1, display: "flex", flexDirection: "column",
+        minWidth: 0,
+      }}>
+        {/* header */}
+        <div style={{
+          padding: "12px 20px", borderBottom:
+            `1px solid ${t.border}`,
+          display: "flex", alignItems: "center", gap: 12,
+        }}>
+          <div style={{
+            flex: 1, overflow: "hidden",
+            textOverflow: "ellipsis", whiteSpace: "nowrap",
+            fontSize: 13, fontWeight: 600,
+          }}>
+            {activeTask ?
+              tasks.find((x) => x.task_id === activeTask)?.objective
+              ?? "conversation"
+              : "CYR@ - start a new task"}
+          </div>
+          <span style={{
+            fontSize: 10, color: connected ? t.accent : t.bad,
+          }}>● {connected ? "local backend online" :
+            "backend offline"}</span>
+          <span style={{
+            fontSize: 10, color: journalValid ? t.dim : t.bad,
+          }}>journal {journalValid ? "valid" : "tampered"}</span>
+        </div>
+
+        {/* thread */}
+        <div ref={scrollRef} style={{
+          flex: 1, overflowY: "auto",
+          display: "flex", justifyContent: "center",
+        }}>
+          <div style={{
+            width: "min(780px, 100%)", padding: "20px 16px 8px",
+          }}>
+            {!activeTask ? (
+              <div style={{
+                textAlign: "center", marginTop: "12vh", color: t.dim,
+              }}>
+                <div style={{ fontSize: 44, fontWeight: 800,
+                              letterSpacing: 3, color: t.text }}>
+                  CYR@</div>
+                <div style={{ marginTop: 8, fontSize: 13 }}>
+                  Type a task below - I plan, authorize, and execute
+                  with real tools (terminal, files, git, browser,
+                  security research).</div>
+                <div style={{ marginTop: 14, fontSize: 11, color: t.dim }}>
+                  run `print('hi')` - show git status - research the
+                  WebKit target - analyze this repo</div>
+              </div>
+            ) : null}
+            {messages.map((m, i) => (
+              <div key={i} style={{
+                marginTop: 12,
+                display: "flex",
+                justifyContent: m.role === "user" ?
+                  "flex-end" : "flex-start",
+              }}>
+                <div style={{
+                  maxWidth: m.role === "user" ? "78%" : "100%",
+                  background: m.role === "user" ? t.user : t.assistant,
+                  border: m.role === "assistant" ?
+                    `1px solid ${t.border}` : "none",
+                  borderRadius: 12, padding: "10px 14px",
+                  fontSize: 13.5,
+                }}>
+                  {m.role === "assistant" && (m.activity ?? []).map(
+                    (a, j) => (
+                      <ActivityCard key={j} a={a} t={t}
+                        onGranted={() => {
+                          // auto re-run after granting
+                          send(lastUserText.current);
+                        }}
+                        say={say} />))}
+                  <Md text={m.content} t={t} />
+                  {m.role === "assistant" && m.mode === "LOCAL" ? (
+                    <div style={{
+                      fontSize: 10, color: t.dim, marginTop: 6,
+                      borderTop: `1px dashed ${t.border}`,
+                      paddingTop: 4,
+                    }}>LOCAL mode - deterministic reply from real
+                      tool results (configure a model in Settings
+                      for model-composed replies)</div>
+                  ) : null}
+                  {m.role === "assistant" && m.mode === "remote" ? (
+                    <div style={{
+                      fontSize: 10, color: t.dim, marginTop: 6,
+                    }}>{m.model}</div>
+                  ) : null}
+                </div>
+              </div>
+            ))}
+            {busy ? (
+              <div style={{
+                marginTop: 10, color: t.dim, fontSize: 12,
+                display: "flex", gap: 8, alignItems: "center",
+              }}>
+                <span className="pulse" style={{
+                  width: 8, height: 8, borderRadius: 8,
+                  background: t.accent, display: "inline-block",
+                }} />
+                working - executing tools ...
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        {/* composer */}
+        <div style={{
+          borderTop: `1px solid ${t.border}`,
+          padding: "12px 16px 16px",
+          display: "flex", justifyContent: "center",
+        }}>
+          <div style={{
+            width: "min(780px, 100%)",
+            background: t.panel,
+            border: `1px solid ${t.border}`,
+            borderRadius: 14, padding: "10px 12px",
+            display: "flex", flexDirection: "column", gap: 8,
+          }}>
+            <textarea
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  activeTask ? send() : newTask();
+                }
+              }}
+              placeholder={activeTask ?
+                "message CYR@ ... (Enter to send, Shift+Enter newline)" :
+                "describe a task to start ..."}
+              rows={2}
+              style={{
+                background: "transparent", color: t.text,
+                border: "none", outline: "none", resize: "none",
+                fontSize: 13.5, fontFamily: "inherit",
+                maxHeight: 180,
+              }} />
+            <div style={{
+              display: "flex", alignItems: "center", gap: 8,
+            }}>
+              <ModelPicker t={t} value={activeModel}
+                onChange={(m) => {
+                  setModel(m); setTaskModel(m);
+                  if (activeTask) api(
+                    `/api/tasks/${activeTask}/model`, {
+                    method: "POST",
+                    body: JSON.stringify({ model: m }),
+                  }).catch(() => { });
+                }}
+                openSettings={() => setShowSettings(true)} />
+              <span style={{
+                fontSize: 10, color: t.dim,
+              }}>loopback - deny-by-default auth</span>
+              <button onClick={() =>
+                activeTask ? send() : newTask()} disabled={busy}
+                style={{
+                  marginLeft: "auto",
+                  background: busy ? t.accentDim : t.accent,
+                  color: "#08120b", border: "none",
+                  borderRadius: 9, padding: "7px 18px",
+                  fontSize: 13, fontWeight: 700,
+                  cursor: busy ? "default" : "pointer",
+                }}>{busy ? "..." : "send"}</button>
+            </div>
+          </div>
+        </div>
+
+        {/* console strip */}
+        {consoleMsg.length ? (
+          <div style={{
+            borderTop: `1px solid ${t.border}`,
+            padding: "5px 16px", fontSize: 10, color: t.dim,
+            maxHeight: 46, overflow: "hidden",
+          }}>
+            {consoleMsg.slice(-2).map((m, i) => <div key={i}>{m}</div>)}
+          </div>
+        ) : null}
       </div>
-      <div style={{ padding: "0 16px" }}>
-        {view === "Tasks" ? <TasksPanel t={t} refresh={refresh} say={say} /> : null}
-        {view === "Activity" ? <ActivityPanel t={t} entries={journal} /> : null}
-        {view === "Workspace" ? <WorkspacePanel t={t} say={say} /> : null}
-        {view === "Terminal" ? <TerminalPanel t={t} say={say} /> : null}
-        {view === "Git" ? <GitPanel t={t} say={say} /> : null}
-        {view === "Browser" ? <BrowserPanel t={t} say={say} /> : null}
-        {view === "Agents" ? <AgentsPanel t={t} say={say} /> : null}
-        {view === "Research" ? <ResearchPanel t={t} say={say} /> : null}
-        {view === "Artifacts" ? <ArtifactsPanel t={t} say={say} /> : null}
-        {view === "Reports" ? <ReportsPanel t={t} say={say} /> : null}
-        {view === "Settings" ? <SettingsPanel t={t} say={say} /> : null}
-      </div>
-      <div style={{ ...box(t), margin: "12px 16px", fontSize: 12 }}>
-        <div style={label(t)}>console</div>
-        {consoleLog.slice(-8).map((l: string, i: number) => <div key={i}>{l}</div>)}
-        {consoleLog.length === 0 ?
-          <span style={{ color: t.dim }}>activity log (nothing yet)</span> : null}
-      </div>
-      <div style={{ padding: "6px 16px", fontSize: 10, color: t.dim, display: "flex", gap: 14 }}>
-        <span>engines: {status ? status.engines.filter((e: any) => e.available).map((e: any) => e.name).join(", ") : "-"}</span>
-        <span>auth: deny-by-default</span>
-        <span>loopback only</span>
-        <span>v1.0.0</span>
-      </div>
+
+      {showSettings ? (
+        <SettingsModal t={t} close={() => setShowSettings(false)}
+          onProvidersChanged={() => { loadTasks(); }} />
+      ) : null}
     </div>
   );
 }

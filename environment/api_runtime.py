@@ -5,6 +5,8 @@ app.create_app. Every sensitive operation flows through the
 central capability system - no endpoint bypasses it."""
 from __future__ import annotations
 
+import json
+
 from fastapi import HTTPException
 from pydantic import BaseModel
 
@@ -119,6 +121,24 @@ class EvidenceRecord(BaseModel):
     confidence: float = 0.5
 
 
+class ChatTurn(BaseModel):
+    task_id: str
+    text: str
+    model: dict | None = None      # {"provider", "model_id"}
+    set_task_model: bool = True
+
+
+class ModelSelection(BaseModel):
+    task_id: str | None = None   # path wins when provided
+    model: dict | None = None    # null = LOCAL mode
+
+
+class ProviderWithKey(BaseModel):
+    spec: dict
+    api_key: str = ""
+    models: list = []              # model ids for the picker
+
+
 class AgentRunRequest(BaseModel):
     kind: str
     task: dict
@@ -137,6 +157,144 @@ def _auth_fail(e: Exception):
 def register_runtime_endpoints(app, env):
     journal = env.journal
     orch = env.orchestrator
+
+    # ================================================ chat
+    from .chat import ChatEngine
+    chat = ChatEngine(env)
+
+    @app.post("/api/chat")
+    def chat_turn(spec: ChatTurn):
+        """One user message -> one turn: real tool execution +
+        model-composed or LOCAL reply."""
+        t = env.taskstore.get(spec.task_id)
+        if t is None:
+            raise HTTPException(404, "unknown task")
+        if spec.set_task_model and spec.model is not None:
+            t.data["model"] = spec.model
+            env.taskstore._persist(t)
+        out = chat.turn(spec.task_id, spec.text,
+                        spec.model)
+        if "error" in out:
+            raise HTTPException(404, out["error"])
+        return out
+
+    @app.get("/api/chat/{task_id}/messages")
+    def chat_messages(task_id: str):
+        return {"task_id": task_id,
+                "messages": chat.store.messages(
+                    task_id)}
+
+    @app.post("/api/tasks/{task_id}/model")
+    def set_task_model(task_id: str,
+                       spec: ModelSelection):
+        t = env.taskstore.get(task_id)
+        if t is None:
+            raise HTTPException(404, "unknown task")
+        t.data["model"] = spec.model
+        env.taskstore._persist(t)
+        journal.append("task_model_set",
+                       task_id=task_id,
+                       model=spec.model)
+        return {"task_id": task_id,
+                "model": spec.model}
+
+    @app.get("/api/models/list")
+    def models_list():
+        """The model picker data: LOCAL + every configured
+        provider's model ids + role bindings."""
+        providers = []
+        for name, spec in \
+                env.providers.config[
+                    "providers"].items():
+            providers.append({
+                "name": name,
+                "base_url": spec["base_url"],
+                "disabled": bool(
+                    spec.get("disabled")),
+                "has_key": bool(
+                    env.providers.get_api_key(
+                        name)),
+                "models": spec.get("model_ids"
+                                   ) or [],
+            })
+        return {
+            "local_mode": True,
+            "providers": providers,
+            "role_bindings":
+                env.providers.role_status(),
+        }
+
+    class ProviderTest(BaseModel):
+        name: str
+
+    @app.post("/api/providers/test")
+    def provider_test(spec: ProviderTest):
+        p = env.providers.config[
+            "providers"].get(spec.name)
+        if p is None:
+            raise HTTPException(
+                404, "unknown provider")
+        key = env.providers.get_api_key(
+            spec.name)
+        if not key:
+            return {"ok": False,
+                    "reason": "no API key stored"}
+        try:
+            req = __import__(
+                "urllib.request",
+                fromlist=["x"]).Request(
+                p["base_url"] + "/models",
+                headers={
+                    "Authorization":
+                        "Bearer " + key})
+            with __import__(
+                    "urllib.request",
+                    fromlist=["x"]).urlopen(
+                        req, timeout=20) as r:
+                data = json.loads(
+                    r.read().decode())
+            models = [m.get("id")
+                      for m in data.get(
+                          "data", [])
+                      if isinstance(m, dict)]
+            return {"ok": True,
+                    "models": models[:200]}
+        except Exception as e:
+            return {"ok": False,
+                    "reason": repr(e)[:200]}
+
+    @app.post("/api/providers/with_key")
+    def provider_with_key(spec: ProviderWithKey):
+        """Add a provider with its API key: the key goes to
+        the OS credential store immediately and is never
+        persisted in any config file, journal, or log."""
+        try:
+            env.providers.add_provider(
+                spec.spec)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if spec.api_key:
+            if spec.spec.get("model_ids") is None:
+                spec.spec["model_ids"] = \
+                    spec.models
+            rec = env.providers.store_api_key(
+                spec.spec["name"], spec.api_key)
+            if not rec.get("stored"):
+                raise HTTPException(
+                    400, rec.get("reason",
+                                 "key storage "
+                                 "refused"))
+        # record the picker-visible model ids in the provider
+        if spec.models:
+            env.providers.config["providers"][
+                spec.spec["name"]][
+                "model_ids"] = spec.models
+            env.providers._save()
+        return {"provider": spec.spec["name"],
+                "configured": True,
+                "has_key": bool(
+                    env.providers.get_api_key(
+                        spec.spec["name"]))}
 
     # ================================================ tasks
     @app.post("/api/tasks")
