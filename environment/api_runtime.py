@@ -128,6 +128,10 @@ class ChatTurn(BaseModel):
     set_task_model: bool = True
 
 
+class SteerSpec(BaseModel):
+    text: str
+
+
 class ReinitStart(BaseModel):
     model: dict | None = None
     repos: list[str] | None = None
@@ -451,6 +455,36 @@ def register_runtime_endpoints(app, env):
         if "error" in rec:
             raise HTTPException(404, rec["error"])
         return rec
+
+    @app.post("/api/tasks/{task_id}/steer")
+    def task_steer(task_id: str, spec: SteerSpec):
+        """Steer a running session: queued text is consumed
+        between the turn's intents (re-routed and executed)."""
+        t = env.taskstore.get(task_id)
+        if t is None:
+            raise HTTPException(404, "unknown task")
+        t.data.setdefault("steer_queue",
+                          []).append(spec.text[:2000])
+        env.taskstore._persist(t)
+        t.event("steered", spec.text[:120])
+        return {"task_id": task_id,
+                "queued": spec.text[:120]}
+
+    @app.post("/api/tasks/{task_id}/abort")
+    def task_abort(task_id: str):
+        """Abort the running turn: marks the task cancelled;
+        the chat engine stops between intents and reports
+        what completed before the abort."""
+        t = env.taskstore.get(task_id)
+        if t is None:
+            raise HTTPException(404, "unknown task")
+        try:
+            t.transition("cancelled",
+                         "aborted by user")
+            t.event("aborted")
+        except Exception as e:
+            raise HTTPException(400, str(e))
+        return {"task_id": task_id, "aborted": True}
 
     @app.post("/api/tasks/{task_id}/redirect")
     def task_redirect(task_id: str,

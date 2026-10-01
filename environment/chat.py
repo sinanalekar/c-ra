@@ -88,11 +88,43 @@ class ChatEngine:
         # ---- understand + route (deterministic LOCAL intent
         #      detection; the model, when bound, composes the
         #      final reply from the REAL results below)
-        intents = self._intents(text)
+        # pending holds (intent, source_text) pairs so
+        # steered intents execute against THEIR text
+        pending = [(i, text)
+                   for i in self._intents(text)]
         results: list[dict] = []
-        for intent in intents:
+        aborted = False
+        steered: list[str] = []
+        while pending:
+            task = self.env.taskstore.get(task_id)
+            if task is None:
+                break
+            # ABORT: a stop/cancel lands between intents
+            if task.data["state"] == "cancelled":
+                aborted = True
+                activity.append({
+                    "type": "info",
+                    "detail": "turn aborted by user "
+                              "(task stopped)"})
+                break
+            # STEER: queued steering text is consumed between
+            # intents and re-routed against its own text
+            queue = task.data.get("steer_queue") or []
+            while queue:
+                steer_text = queue.pop(0)
+                task.data["steer_queue"] = queue
+                self.env.taskstore._persist(task)
+                steered.append(steer_text)
+                activity.append({
+                    "type": "info",
+                    "detail": "steer: " +
+                              steer_text[:120]})
+                pending.extend(
+                    (i, steer_text)
+                    for i in self._intents(steer_text))
+            intent, source = pending.pop(0)
             out = self._execute_intent(
-                task_id, intent, text, activity)
+                task_id, intent, source, activity)
             results.append(out)
 
         # ---- compose the assistant reply
@@ -103,6 +135,14 @@ class ChatEngine:
         else:
             reply = self._local_reply(
                 text, results, route)
+        if aborted:
+            reply = ("**Turn aborted.** Work completed "
+                     "before the abort is below.\n\n" +
+                     reply)
+        if steered:
+            reply = ("**Steered mid-turn:** " +
+                     "; ".join(s[:80] for s in steered) +
+                     "\n\n" + reply)
         assistant_msg = self.store.append(task_id, {
             "role": "assistant",
             "content": reply,
@@ -112,7 +152,7 @@ class ChatEngine:
             "results": results})
         task.event("chat_turn",
                    "user message handled (%d intents)"
-                   % len(intents))
+                   % len(results))
         return {"user": user_msg,
                 "assistant": assistant_msg,
                 "activity": activity}

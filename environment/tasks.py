@@ -73,7 +73,7 @@ class Task:
                        "failed"},
         "completed": set(),
         "failed": {"recovering"},
-        "cancelled": set(),
+        "cancelled": {"running"},   # reopen after an abort
     }
 
     def transition(self, new_state: str, reason: str = ""):

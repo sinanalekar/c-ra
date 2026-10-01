@@ -63,6 +63,53 @@ const NAV = ["Home", "Tasks", "Research", "Tools", "Agents",
   "Memory", "Settings", "Diagnostics"] as const;
 type Nav = typeof NAV[number];
 
+/* ---------------------------------------------- error boundary */
+
+class Boundary extends React.Component<
+  { t: T; children: React.ReactNode },
+  { err: string | null }> {
+  constructor(props: any) {
+    super(props);
+    this.state = { err: null };
+  }
+  static getDerivedStateFromError(e: any) {
+    return { err: String(e) };
+  }
+  render() {
+    if (this.state.err) {
+      return (
+        <div style={{
+          padding: 20, color: this.props.t.dim,
+          fontSize: 13,
+        }}>
+          <b style={{ color: this.props.t.bad }}>
+            view error</b><br />
+          {this.state.err.slice(0, 300)}<br />
+          <button onClick={() =>
+            this.setState({ err: null })}
+            style={{
+              marginTop: 10, padding: "6px 14px",
+              background: this.props.t.surface,
+              color: this.props.t.text,
+              border: `1px solid ${
+                this.props.t.border}`,
+              borderRadius: 6, cursor: "pointer",
+            }}>retry</button>
+        </div>);
+    }
+    return this.props.children;
+  }
+}
+
+function Empty({ t, what }: { t: T; what: string }) {
+  return (
+    <div style={{
+      padding: "26px 8px", textAlign: "center",
+      color: t.faint, fontSize: 12.5,
+    }}>
+      {what}</div>);
+}
+
 /* ---------------------------------------------- mark */
 
 function Mark({ size = 26 }: { size?: number }) {
@@ -339,6 +386,8 @@ function ReinitPanel({ t, onDone }: {
   const [session, setSession] = useState<any>(null);
   const [running, setRunning] = useState(false);
   const [manifest, setManifest] = useState<any>(null);
+  const [selected, setSelected] =
+    useState<Record<string, boolean>>({});
   const REPOS = ["veritas", "hydra", "seek", "cider",
     "frontier", "cyr"];
 
@@ -347,17 +396,23 @@ function ReinitPanel({ t, onDone }: {
       .then(setManifest).catch(() => { });
   }, []);
 
+  const repoOn = (r: string) => selected[r] !== false;
+
   const start = async () => {
     setRunning(true);
     try {
-      const out = await api<any>("/api/reinitialize/start", {
+      const out = await api<any>(
+        "/api/reinitialize/start", {
         method: "POST",
         body: JSON.stringify({
-          model: model ?? undefined }),
+          model: model ?? undefined,
+          repos: REPOS.filter(repoOn),
+        }),
       });
       setSession(out);
-    } catch (e) { setSession({ state: "FAILED",
-      error: String(e) }); }
+    } catch (e) {
+      setSession({ state: "FAILED", error: String(e) });
+    }
     setRunning(false);
     onDone();
   };
@@ -387,8 +442,8 @@ function ReinitPanel({ t, onDone }: {
       <div style={{ fontSize: 12, color: t.dim,
                     marginBottom: 14 }}>
         Start a fresh AI initialization session and check the
-        configured research repositories for updates.
-        Safe automatic integration; push stays disabled.</div>
+        selected research repositories for updates. Safe
+        automatic integration; push stays disabled.</div>
 
       <div style={{ display: "flex", gap: 10,
                     alignItems: "center", marginBottom: 10 }}>
@@ -404,13 +459,23 @@ function ReinitPanel({ t, onDone }: {
         <span style={{ fontSize: 11, color: t.dim,
                        width: 52 }}>Repos</span>
         {REPOS.map((r) => (
-          <span key={r} style={{
-            fontSize: 11, padding: "2px 9px",
-            borderRadius: 9,
-            border: `1px solid ${t.border}`,
-            color: manifest?.repos?.[r]
-              ?.last_seen_commit ? t.text : t.faint,
-          }}>☑ {r}</span>))}
+          <button key={r} onClick={() =>
+            setSelected({ ...selected,
+              [r]: !repoOn(r) })} style={{
+            fontSize: 11, padding: "3px 10px",
+            borderRadius: 9, cursor: "pointer",
+            border: `1px solid ${
+              repoOn(r) ? t.accent : t.border}`,
+            background: repoOn(r) ?
+              t.surface : "transparent",
+            color: repoOn(r) ? t.text : t.faint,
+          }}>{repoOn(r) ? "☑" : "☐"} {r}</button>))}
+        <button onClick={() =>
+          setSelected({})} style={{
+          fontSize: 10, color: t.faint,
+          background: "transparent", border: "none",
+          cursor: "pointer",
+        }}>select all</button>
       </div>
       <div style={{ display: "flex", gap: 10,
                     alignItems: "center" }}>
@@ -470,7 +535,11 @@ function Diagnostics({ t }: { t: T }) {
     api<any>("/api/diagnostics")
       .then(setD).catch(() => { });
   }, []);
-  if (!d) return <div style={{ color: t.faint }}>loading…</div>;
+  if (!d) return (
+    <Empty t={t} what="loading diagnostics — is the backend online?" />);
+  if (d.error) return (
+    <Empty t={t} what={"diagnostics unavailable: " +
+      String(d.error).slice(0, 200)} />);
   return (
     <div>
       <div style={{ display: "grid",
@@ -526,11 +595,16 @@ function Diagnostics({ t }: { t: T }) {
 /* ---------------------------------------------- registry view */
 
 function CapabilityList({ t }: { t: T }) {
-  const [caps, setCaps] = useState<CapRec[]>([]);
+  const [caps, setCaps] = useState<CapRec[] | null>(null);
   useEffect(() => {
     api<any>("/api/capabilities")
-      .then((r) => setCaps(r.capabilities)).catch(() => { });
+      .then((r) => setCaps(r.capabilities)).catch(() =>
+        setCaps([]));
   }, []);
+  if (caps === null) return (
+    <Empty t={t} what="loading capability registry…" />);
+  if (!caps.length) return (
+    <Empty t={t} what="capability registry unavailable — is the backend online?" />);
   return (
     <div>
       {caps.map((c) => (
@@ -1040,6 +1114,8 @@ export default function App() {
                       borderRadius: 5,
                     }}>{op}</button>))}
                 </div>)))}
+            {nav === "Tasks" && !tasks.length ? (
+              <Empty t={t} what="no tasks yet — start one from Home" />) : null}
 
             {nav === "Research" && (<>
               <ReinitPanel t={t} onDone={poll} />
@@ -1048,7 +1124,7 @@ export default function App() {
                   textTransform: "uppercase",
                   letterSpacing: 1, marginBottom: 6 }}>
                   research activity (journal)</div>
-                {journal.map((e, i) => (
+                {journal.length ? journal.map((e, i) => (
                   <div key={i} style={{
                     display: "flex", gap: 10, fontSize: 11.5,
                     padding: "3px 6px",
@@ -1057,27 +1133,42 @@ export default function App() {
                     <span style={{ color: t.faint }}>
                       {e.ts?.slice(11, 19)}</span>
                     <span>{e.action}</span>
-                  </div>))}
+                  </div>)) : (
+                  <Empty t={t} what="no research activity recorded yet — open a task or run Reinitialize" />)}
               </div>
             </>)}
 
-            {nav === "Tools" && <>
+            {nav === "Tools" && (<>
               <div style={{ fontSize: 12, color: t.dim,
                             marginBottom: 10 }}>
                 Tool runtimes with real implementation
                 status. Use chat to drive them.</div>
-              <CapabilityList t={t} />
-            </>}
+              {caps.length ?
+                <CapabilityList t={t} /> :
+                <Empty t={t} what="loading capability registry — is the backend online?" />}
+            </>)}
 
-            {nav === "Agents" && <>
-              <CapabilityList t={t} />
-            </>}
+            {nav === "Agents" && (<>
+              <div style={{ fontSize: 12, color: t.dim,
+                            marginBottom: 10 }}>
+                Agent controls + capability truth. Agents run
+                with stable run IDs and real pause/stop.</div>
+              {caps.length ?
+                <CapabilityList t={t} /> :
+                <Empty t={t} what="loading capabilities…" />}
+            </>)}
 
             {nav === "Memory" && <MemoryView t={t} />}
 
-            {nav === "Settings" && <Settings t={t} />}
+            {nav === "Settings" && (
+              <Boundary t={t}>
+                <Settings t={t} />
+              </Boundary>)}
 
-            {nav === "Diagnostics" && <Diagnostics t={t} />}
+            {nav === "Diagnostics" && (
+              <Boundary t={t}>
+                <Diagnostics t={t} />
+              </Boundary>)}
           </div>
         </div>
 
@@ -1100,14 +1191,17 @@ export default function App() {
                 <textarea value={draft} rows={2}
                   onChange={(e) => setDraft(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
+                    if (e.key === "Enter" && !e.shiftKey
+                        && !busy) {
                       e.preventDefault();
                       active ? send() :
                         newTask(draft.trim() || undefined);
                     }
                   }}
                   placeholder={active ?
-                    "message CYR@… (Enter send)" :
+                    (busy ?
+                      "steer the running session… (Enter to steer)" :
+                      "message CYR@… (Enter send)") :
                     "describe a task…"}
                   style={{
                     background: "transparent", color: t.text,
@@ -1131,7 +1225,40 @@ export default function App() {
                   <span style={{ fontSize: 10,
                                  color: t.faint }}>
                     local · loopback · evidence-first</span>
-                  <button onClick={() => active ? send() :
+                  {busy && active ? (<>
+                    <button onClick={async () => {
+                      if (!draft.trim()) return;
+                      const r = await api<any>(
+                        `/api/tasks/${active}/steer`, {
+                        method: "POST",
+                        body: JSON.stringify(
+                          { text: draft.trim() }) });
+                      setDraft("");
+                    }} disabled={!draft.trim()} style={{
+                      marginLeft: "auto",
+                      background: t.surface,
+                      color: t.text,
+                      border: `1px solid ${t.border}`,
+                      borderRadius: 8, padding: "7px 14px",
+                      fontSize: 12, fontWeight: 600,
+                      cursor: draft.trim() ?
+                        "pointer" : "default",
+                    }}>steer ⇪</button>
+                    <button onClick={async () => {
+                      await api(
+                        `/api/tasks/${active}/abort`, {
+                        method: "POST", body: "{}",
+                      }).catch(() => { });
+                      setBusy(false);
+                    }} style={{
+                      background: "#3a2528",
+                      color: t.bad,
+                      border: `1px solid ${t.bad}`,
+                      borderRadius: 8, padding: "7px 14px",
+                      fontSize: 12, fontWeight: 700,
+                      cursor: "pointer",
+                    }}>abort ⏹</button>
+                  </>) : (<button onClick={() => active ? send() :
                     newTask(draft.trim())}
                     disabled={busy || !draft.trim()} style={{
                     marginLeft: "auto",
@@ -1144,7 +1271,7 @@ export default function App() {
                     fontWeight: 700,
                     cursor: busy || !draft.trim() ?
                       "default" : "pointer",
-                  }}>{busy ? "…" : "send ⏎"}</button>
+                  }}>{busy ? "…" : "send ⏎"}</button>)}
                 </div>
               </div>
             </div>
@@ -1169,16 +1296,20 @@ function MemoryView({ t }: { t: T }) {
                     marginBottom: 10 }}>
         Local persistent memory by kind + content-hashed
         artifacts. Secrets are redacted on write.</div>
-      <div style={{ display: "flex", gap: 8,
-                    marginBottom: 14, flexWrap: "wrap" }}>
-        {mem && Object.entries(mem).map(([k, v]: any) => (
-          <span key={k} style={{
-            fontSize: 11.5, padding: "4px 12px",
-            borderRadius: 8, background: t.panel,
-            border: `1px solid ${t.border}`,
-          }}>{k}: {v}</span>))}
-      </div>
-      {(arts ?? []).slice(-15).reverse().map((a: any) => (
+      {mem && Object.keys(mem).length ? (
+        <div style={{ display: "flex", gap: 8,
+                      marginBottom: 14, flexWrap: "wrap" }}>
+          {Object.entries(mem).map(([k, v]: any) => (
+            <span key={k} style={{
+              fontSize: 11.5, padding: "4px 12px",
+              borderRadius: 8, background: t.panel,
+              border: `1px solid ${t.border}`,
+            }}>{k}: {v}</span>))}
+        </div>) : (
+        <Empty t={t} what="no memory recorded yet — chat,
+          run tools, or do research to build memory" />)}
+      {(arts ?? []).length ? arts.slice(-15).reverse()
+        .map((a: any) => (
         <div key={a.artifact_id} style={{
           display: "flex", gap: 10, fontSize: 11.5,
           padding: "5px 8px",
@@ -1190,6 +1321,8 @@ function MemoryView({ t }: { t: T }) {
           <span style={{ marginLeft: "auto",
                         color: t.faint }}>
             {a.sha256?.slice(0, 12)}</span>
-        </div>))}
+        </div>)) : (
+        <Empty t={t} what="no artifacts yet — tool runs and
+          reports produce content-hashed artifacts" />)}
     </div>);
 }
