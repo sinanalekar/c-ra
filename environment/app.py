@@ -7,6 +7,7 @@ the vertical slice, Tauri sidecar IPC for the packaged shell)."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -101,6 +102,18 @@ class Environment:
         # server listens (see environment.server) - the API is
         # never blocked behind catalog fetches
         self.discovery = None
+        # Reinitialize subsystem (differential sync with the
+        # research ecosystem)
+        from .reinit import ReinitEngine
+        self.reinit = ReinitEngine(
+            self.config.workspace, self.journal)
+        try:
+            import environment
+            self.reinit.cfg.set_cyr_path(
+                str(Path(__file__).resolve()
+                    .parent.parent))
+        except Exception:
+            pass
         # first-run defaults: the standard local working set is
         # granted for the session so the app works out of the
         # box (recorded in the journal; revocable in Settings;

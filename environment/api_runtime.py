@@ -128,6 +128,11 @@ class ChatTurn(BaseModel):
     set_task_model: bool = True
 
 
+class ReinitStart(BaseModel):
+    model: dict | None = None
+    repos: list[str] | None = None
+
+
 class ModelSelection(BaseModel):
     task_id: str | None = None   # path wins when provided
     model: dict | None = None    # null = LOCAL mode
@@ -167,6 +172,61 @@ def register_runtime_endpoints(app, env):
                 "product": "CYR@",
                 "discovery_running":
                     env.discovery is None}
+
+    # ===================================== capability registry
+    @app.get("/api/capabilities")
+    def capabilities_registry():
+        """The authoritative capability truth the UI must
+        consume (implementation status + authorization +
+        availability + reason)."""
+        from .capability_registry import build_registry
+        return build_registry(env)
+
+    # ===================================== diagnostics
+    @app.get("/api/diagnostics")
+    def diagnostics():
+        from .capability_registry import \
+            build_diagnostics
+        return build_diagnostics(env)
+
+    # ===================================== reinitialize
+    @app.post("/api/reinitialize/start")
+    def reinit_start(spec: ReinitStart):
+        """Start a fresh AI initialization + synchronization
+        session over the research ecosystem. Durable, real git
+        inspection, evidence-backed; auto-push disabled."""
+        route = spec.model
+        if route is None:
+            binding = env.providers.config[
+                "role_bindings"].get(
+                "security_researcher") or {}
+            route = ({"provider": binding["provider"],
+                      "model_id":
+                          binding["model_id"]}
+                     if binding.get("provider")
+                     else {"provider": "LOCAL"})
+        out = env.reinit.start(
+            model=route, repos=spec.repos,
+            providers=env.providers)
+        return out
+
+    @app.get("/api/reinitialize/status")
+    def reinit_status():
+        return env.reinit.current() or \
+               {"state": "none"}
+
+    @app.get("/api/reinitialize/manifest")
+    def reinit_manifest():
+        return env.reinit.manifest_data()
+
+    @app.get("/api/reinitialize/config")
+    def reinit_config():
+        return env.reinit.config_data()
+
+    @app.get("/api/reinitialize/sessions")
+    def reinit_sessions():
+        return {"sessions":
+                    env.reinit.sessions()}
 
     # ================================================ chat
     from .chat import ChatEngine

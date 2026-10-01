@@ -400,24 +400,40 @@ class ChatEngine:
             return {"intent": intent,
                     "error": repr(e)[:300]}
 
+    @staticmethod
+    def _strip_prose(code: str) -> str:
+        """Remove trailing natural-language joins
+        ("... and tell me the output")."""
+        cut = re.split(
+            r"\s+(?:and|then|after|so that)\s+(?:tell|"
+            r"show|explain|describe|report|give)\b",
+            code, flags=re.I)[0]
+        cut = re.split(r"\s+and\s+then\b", cut,
+                       flags=re.I)[0]
+        cut = re.sub(r"\s+and$", "", cut, flags=re.I)
+        return cut.strip().strip("`\"'")
+
     def _extract_command(self, text: str) -> str:
         """Best-effort command extraction for the terminal
-        intent: fenced code blocks first, then after 'run'."""
+        intent: fenced code blocks first, then after 'run';
+        trailing prose joins are stripped so the command is
+        executable."""
         m = re.search(r"```(?:\w+)?\n(.*?)```",
                       text, re.S)
         if m:
-            return m.group(1).strip()[:500]
+            return ChatEngine._strip_prose(
+                m.group(1).strip())[:500]
         m = re.search(
             r"(?:run|execute|command)\s*[:`]?\s*(.+)",
             text, re.I)
         if m:
-            return m.group(1).strip().strip(
-                "`\"'")[:500]
+            return ChatEngine._strip_prose(
+                m.group(1))[:500]
         # fall back to the whole message as code if it
         # looks like code
         if any(c in text for c in ("print(", "=",
                                    "import ")):
-            return text[:500]
+            return ChatEngine._strip_prose(text)[:500]
         return "echo " + text.strip()[:200]
 
     # ------------------------------------------------ replies
@@ -538,16 +554,30 @@ class ChatEngine:
                 {"mode": "LOCAL"}) +
                 "\n\n[provider key missing - "
                 "LOCAL reply]")
-        context = json.dumps(
-            [{"intent": r["intent"],
-              **{k: v for k, v in r.items()
-                 if k in ("command", "path",
-                          "current", "git_branch",
-                          "git_changes", "files",
-                          "url", "error",
-                          "needs_permission")}}
-             for r in results],
-            indent=1)[:6000]
+        def _item(r):
+            out = {"intent": r["intent"]}
+            for k in ("command", "path", "current",
+                      "git_branch", "git_changes",
+                      "files", "url", "error",
+                      "needs_permission"):
+                if k in r:
+                    out[k] = r[k]
+            # the actual tool results (exit codes, outputs,
+            # dispositions) MUST reach the model - it must
+            # never see an empty context for executed work
+            res = (r.get("run") or {}).get(
+                "result") or {}
+            if isinstance(res, dict):
+                for k in ("exit_code", "stdout",
+                          "stderr", "disposition",
+                          "hypothesis_id", "title",
+                          "text_head"):
+                    if k in res:
+                        out[k] = str(res[k])[:800]
+            return out
+        context = json.dumps([_item(r)
+                              for r in results],
+                             indent=1)[:8000]
         activity_summary = json.dumps(
             [r["result"] if isinstance(
                 r.get("result"), dict) else {}
